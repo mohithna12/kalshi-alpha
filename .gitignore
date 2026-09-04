@@ -1,0 +1,26 @@
+# --- Secrets. Never commit. ---
+*.pem
+*.key
+*.p8
+*.pkcs8
+.env
+.env.*
+!.env.example
+secrets/
+
+# --- Captured data. Append-only, large, irreplaceable; lives outside git. ---
+data/
+
+# --- Rust build artifacts ---
+/target/
+**/*.rs.bk
+
+# --- Local operational state ---
+*.heartbeat
+heartbeat
+logs/
+
+# --- Editor / OS ---
+.DS_Store
+.idea/
+.vscode/

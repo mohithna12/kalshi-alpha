@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# Refuse any commit whose staged content contains private key material.
+#
+# Rationale, same as tests/read_only_guard.rs: a structural block beats a
+# habit. A key committed once lives in the history forever, and rewriting
+# published history costs far more than a refused commit.
+#
+# There is NO allowlist and NO path exception -- not even for this file. An
+# exception for "test fixtures" or "the scanner itself" is the crack a real key
+# eventually slips through. Instead, every file that legitimately needs to name
+# a PEM header assembles it from fragments, so the marker never appears
+# verbatim anywhere in the repository. This script does the same below.
+#
+# Install with: just setup     (hooks live in .git/hooks and do not clone)
+# Verify with:  just verify-hooks
+# Bypass with:  git commit --no-verify   (don't, unless you have read the diff)
+
+set -uo pipefail
+
+# Assembled from fragments so this file does not match its own pattern.
+K='PRIVATE KEY'
+MARKERS="BEGIN ${K}|BEGIN RSA ${K}|BEGIN OPENSSH ${K}|BEGIN EC ${K}|BEGIN DSA ${K}|BEGIN PGP ${K}|BEGIN ENCRYPTED ${K}"
+
+staged_files() {
+    git diff --cached --name-only --diff-filter=ACM
+}
+
+violations=""
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    if git show ":$file" 2>/dev/null | grep -qE "$MARKERS"; then
+        violations="${violations}${file}\n"
+    fi
+done < <(staged_files)
+
+if [ -n "$violations" ]; then
+    echo "COMMIT REFUSED: private key material found in staged content." >&2
+    echo >&2
+    printf "%b" "$violations" | sed 's/^/  /' >&2
+    echo >&2
+    echo "A key committed once lives in the history forever." >&2
+    echo "Remove it, add it to .gitignore, then re-stage." >&2
+    exit 1
+fi
+
+# Second net: paths that must never be tracked, in case .gitignore is edited
+# or a file is force-added with `git add -f`.
+FORBIDDEN_PATHS='\.pem$|\.key$|\.p8$|\.pkcs8$|(^|/)\.env$|^data/|(^|/)target/'
+bad_paths=$(staged_files | grep -E "$FORBIDDEN_PATHS" || true)
+if [ -n "$bad_paths" ]; then
+    echo "COMMIT REFUSED: a file that must never be tracked is staged." >&2
+    echo >&2
+    printf "%s\n" "$bad_paths" | sed 's/^/  /' >&2
+    echo >&2
+    echo "These are covered by .gitignore, so this means one was force-added." >&2
+    exit 1
+fi
+
+exit 0

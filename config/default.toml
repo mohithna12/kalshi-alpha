@@ -1,0 +1,261 @@
+# kalshi-alpha capture configuration.
+#
+# Every key here can be overridden by an environment variable prefixed with
+# KALSHI_ and using __ as the nesting separator, e.g.
+#   KALSHI_ENV=prod
+#   KALSHI_AUTH__PRIVATE_KEY_PATH=/secure/kalshi.pem
+#
+# NO SECRETS IN THIS FILE. It is committed. The private key is referenced by
+# path and read at startup; the key itself never leaves the machine.
+
+# "demo" or "prod". Demo is the default on purpose: switching to production must
+# be a deliberate act (`--env prod`, which additionally requires
+# --i-understand-this-is-production). Production access here is read-only and
+# safe -- the flag exists to make the switch explicit, not to discourage it.
+env = "demo"
+
+[endpoints.demo]
+# Current documented hosts (docs.kalshi.com, read 2026-08-28).
+rest = "https://external-api.demo.kalshi.co/trade-api/v2"
+ws   = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+
+[endpoints.prod]
+rest = "https://external-api.kalshi.com/trade-api/v2"
+ws   = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+
+# Legacy hosts. Documented as still supported but explicitly superseded; kept
+# here only as a fallback if the current hosts have an incident. Do not make
+# these the default -- building on a host documented as legacy risks a forced
+# migration mid-season.
+[endpoints.demo_legacy]
+rest = "https://demo-api.kalshi.co/trade-api/v2"
+ws   = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+
+[endpoints.prod_legacy]
+rest = "https://api.elections.kalshi.com/trade-api/v2"
+ws   = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+
+[auth]
+# API key ID (a UUID). Not a secret on its own, but prefer setting it via
+# KALSHI_AUTH__KEY_ID rather than committing it.
+key_id = ""
+# Path to the PKCS#8 PEM private key. Never inlined, never logged.
+private_key_path = "~/.kalshi/kalshi-private-key.pem"
+
+[rate_limit]
+# Kalshi rate limiting is a token bucket, not a requests/second cap.
+# Basic tier: 200 read tokens/s, 100 write tokens/s. Most requests cost 10
+# tokens, so Basic sustains ~20 read req/s. Buckets hold 1-2s of budget,
+# allowing a burst of up to 2x after an idle period.
+#
+# We default to Basic and confirm the real tier at startup via
+# GET /account/limits, which is logged at INFO so the assumption is visible.
+# Capture is WebSocket-driven; this budget only governs discovery and
+# pagination, so being conservative costs nothing.
+read_tokens_per_sec = 200
+default_request_cost = 10
+# Bucket capacity in seconds of budget. 1.0 is the conservative Basic-tier
+# assumption; Advanced and above hold 2.0.
+burst_seconds = 1.0
+# 429 responses carry no Retry-After and no X-RateLimit-* headers, and there is
+# no cooldown penalty -- the bucket simply refills. Backoff is therefore blind
+# and self-computed.
+backoff_initial_ms = 250
+backoff_max_ms     = 30_000
+backoff_multiplier = 2.0
+
+[discovery]
+# Series to capture. NFL for the season; the crypto series are for the Stage 2
+# soak, where high delta rates and 15-minute event churn actually exercise the
+# reconnect and lifecycle paths.
+series_tickers = ["KXNFLGAME"]
+# Market statuses to capture.
+statuses = ["open", "unopened"]
+
+# Discovery is a LOOP, not an init step.
+#
+# NFL markets are created throughout the week and during games, so three paths
+# feed the market registry:
+#   1. the startup crawl, which seeds it;
+#   2. live `market_lifecycle_v2` `created` events, which grow it in real time;
+#   3. this periodic full re-crawl, which reconciles the two.
+#
+# If (3) finds a market that (1) and (2) both missed, that market was
+# unsubscribed for some interval and its data is permanently gone -- the same
+# failure class as a dropped record. Each such market is logged at WARN
+# individually and counted as `reconciliation_misses` in the metrics line. A
+# non-zero count is a bug in the live path, not noise.
+reconcile_interval_secs = 900
+
+# A paginated crawl is not an atomic snapshot: markets can be created between
+# page 3 and page 7 and appear in neither. We do not try to fix that -- the
+# cursor sequence and the pass start/end timestamps are recorded, and the
+# reconciliation loop above covers the gap.
+page_limit = 1000
+
+[startup]
+# Confirm the real rate-limit tier rather than assuming Basic. Logged at INFO so
+# the assumption is visible in the record. On failure the tier is reported as
+# UNKNOWN and conservative defaults are kept -- never a silent assumed Basic.
+confirm_tier = true
+# Confirm the real default token cost (unauthenticated endpoint; documented as
+# currently 10).
+confirm_endpoint_costs = true
+
+[clock]
+# Signatures embed a millisecond timestamp, so NTP drift surfaces as a blanket
+# 401 that looks exactly like a bad key, a wrong path, or a wrong salt length.
+# Nothing in the error says "your clock is wrong". Measuring it explicitly turns
+# a baffling 3am outage into an obvious one.
+check_at_startup = true
+recheck_interval_secs = 300
+warn_threshold_ms  = 5_000
+error_threshold_ms = 30_000
+
+[websocket]
+channels = ["orderbook_delta", "ticker", "trade", "market_lifecycle_v2"]
+
+# Which pricing convention the NO side of the orderbook is reported in.
+#
+# "no_leg"  -> use_yes_price: false. A NO bid at $0.5700 is a bid to buy NO at
+#              57 cents, equivalent to a YES ask at $0.4300.
+# "yes_leg" -> use_yes_price: true. NO-side levels arrive already converted to
+#              YES-leg pricing, so one price scale applies to both sides.
+#
+# THERE IS DELIBERATELY NO DEFAULT. The exchange's own default is currently
+# false, but the spec states it "will be flipped to true in a future release,
+# and the flag will then be removed entirely". If we omitted the flag and
+# relied on the default, the meaning of every NO-side price would invert the
+# day that ships -- with no error, no sequence gap, and no reconnect. The bytes
+# would keep arriving and would simply mean something else, discovered months
+# later as data that looks subtly wrong.
+#
+# So the flag is always sent explicitly, the daemon refuses to start without
+# this key, and the active value is written into the Parquet session metadata
+# so January analysis knows which convention a given file is in.
+#
+# VERIFY EMPIRICALLY BEFORE THE SEASON: subscribe one live market under each
+# setting and confirm what (side, price) means in each. Do not infer it.
+pricing_convention = "no_leg"
+
+# Markets per orderbook_delta subscription.
+#
+# INVARIANT: `seq` is scoped per subscription id (sid), NOT per market. One
+# subscribe command covering N markets yields ONE sid whose seq stream is shared
+# across all N. A single gap therefore invalidates every book on that sid.
+# Sharding at 1 market per subscription bounds the blast radius of a gap to one
+# market at the cost of one subscribe command each. Raise this only if the
+# subscription count becomes a problem, and understand what you are trading.
+orderbook_shard_size = 1
+
+# Pace outbound subscribe commands. WebSocket commands do NOT draw from the REST
+# token buckets (the rate-limit docs describe four HTTP buckets only: event
+# Read/Write and perps Read/Write), but a separate, numerically undocumented
+# per-subscription command rate limit does exist -- error code 27, "the
+# subscription exceeded its command rate limit". Firing 200 subscribes as fast
+# as the socket accepts them is therefore untested territory. Pace them.
+subscribe_pace_ms = 25
+
+# Undocumented server caps, to be measured on demo via `just probe-limits`
+# before the first large NFL subscribe. Left unset until measured; when set,
+# the client refuses to exceed them rather than discovering the limit live.
+# max_subscriptions_per_connection =
+# max_markets_per_subscription =
+
+# The server sends WebSocket Ping frames (0x9, body "heartbeat") every ~10s and
+# closes the connection if we do not Pong. If we see no server traffic at all
+# for this long, treat the connection as dead and reconnect.
+read_idle_timeout_secs = 35
+
+reconnect_initial_ms = 500
+reconnect_max_ms     = 60_000
+reconnect_jitter     = 0.3
+
+# NOTE: this sub-table must stay LAST within [websocket]. TOML assigns every
+# key after a sub-table header to that sub-table, so any plain websocket.* key
+# placed below this line silently lands in websocket.lifecycle instead -- which
+# is exactly how the reconnect_* keys went missing once already.
+[websocket.lifecycle]
+# `market_lifecycle_v2` subscribed with no market filter is a single global sid.
+# A gap there cannot be repaired from a book snapshot -- it requires re-running
+# REST discovery, which is heavy and consumes the read budget. So it is placed
+# behind its own backoff and alerts, rather than being allowed to fire silently
+# in a loop.
+rediscovery_backoff_initial_ms = 5_000
+rediscovery_backoff_max_ms     = 900_000
+# Alert (ERROR-level, counted in the metrics line) if lifecycle-gap-triggered
+# rediscovery fires more than this many times in the window.
+rediscovery_alert_threshold = 3
+rediscovery_alert_window_secs = 3600
+
+
+
+[storage]
+# Append-only. Partitioned by channel and UTC date; files are never mutated.
+#
+# Partitioning uses the UTC date of the receive clock. No local timezone appears
+# anywhere in this path: capture runs across the 1 November DST transition,
+# where local time repeats an hour and would make file ordering ambiguous.
+root = "data"
+
+# Files roll on max(size, age).
+#
+# A Parquet footer is written at close. A process killed before that leaves a
+# file that is not truncated but UNREADABLE -- the whole row group is lost. The
+# age bound is therefore the ceiling on what a hard kill can destroy. Five
+# minutes means a SIGKILL costs at most five minutes of one channel rather than
+# an afternoon of a game. More small files is the right trade.
+max_file_age_secs = 300
+max_file_bytes = 134_217_728
+compression = "snappy"
+
+# Rows buffered before a batch is written.
+max_batch_rows = 10_000
+# Flush and roll due files at least this often, even for idle channels -- an
+# idle channel would otherwise hold a footerless file open indefinitely.
+flush_interval_secs = 30
+
+# Depth of the queue between the socket read loop and the writer task.
+#
+# The read path MUST NOT block: tungstenite only flushes Pongs while the loop
+# keeps turning, and error 25 (subscription buffer overflow) is terminal -- a
+# consumer too slow to drain has its subscription killed by the exchange. So
+# when this queue is full, records are dropped and counted rather than applying
+# backpressure to the socket. Losing a row is bad; losing the connection and
+# every book on it is worse.
+queue_capacity = 65_536
+
+# Scan for and quarantine footerless files from a previous crash before opening
+# any writer. Quarantined files are moved to data/_quarantine/, never deleted.
+quarantine_on_startup = true
+
+[observability]
+# Metrics line cadence. The line reports, per sid: messages/sec, gap count,
+# cumulative invalidation duration, recovery method counts (resubscribe vs
+# full reconnect), lifecycle events, reconnects, and bytes written.
+#
+# The gap-rate number is the point: it decides empirically whether
+# orderbook_shard_size = 1 is buying anything, or whether 200 subscriptions are
+# being paid for a failure that happens twice a month.
+metrics_interval_secs = 60
+# Emit a per-sid breakdown, not just the aggregate. Verbose, but this is the
+# data the sharding decision rests on.
+metrics_per_sid = true
+
+# Runtime canary for the tick-grid model.
+#
+# `price_ranges` gives {start, end, step} bands but the docs never say whether
+# `end` is inclusive; we assume it is. The exchange only ever quotes on-grid
+# prices, so any observed book price failing PriceRanges::is_valid means our
+# grid model is wrong or the grid we hold is stale. Each occurrence logs WARN
+# with market, price and bands, and increments `off_grid_prices` in the 60s
+# metrics line. A non-zero count on day one is the signal; do not suppress it.
+warn_on_off_grid_prices = true
+# Cap WARN volume if a whole market goes off-grid -- the counter still counts
+# every occurrence, only the log lines are throttled.
+off_grid_warn_per_market_per_min = 5
+# Touched every 30s so an external watchdog can detect a stall.
+heartbeat_path = "data/.heartbeat"
+heartbeat_interval_secs = 30
+log_format = "json"
+log_level  = "info"

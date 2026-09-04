@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        # Excludes the delta specification, which is red by design until
+        # OrderBook::apply_delta is implemented. Regressions elsewhere still
+        # fail the build.
+        run: cargo test --workspace -- --skip delta_spec_
+      - name: Build release
+        run: cargo build --release --workspace
+
+  # The executable specification for the delta-application function that is
+  # deliberately left unimplemented. Expected red; reported, not blocking.
+  delta-spec:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Delta specification (expected red until implemented)
+        run: cargo test --workspace delta_spec_
+
+  # Structural guarantee: this repository must contain no order-placement path.
+  # The real check lives in tests/read_only_guard.rs so it fails locally on
+  # `cargo test` before push, not only in CI.
+  read-only-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --test read_only_guard -- --nocapture

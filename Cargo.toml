@@ -1,0 +1,104 @@
+[workspace]
+members = ["crates/common", "crates/ingest", "crates/store"]
+resolver = "2"
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+license    = "MIT OR Apache-2.0"
+repository = "https://github.com/mohithram/kalshi-alpha"
+
+[workspace.dependencies]
+# --- internal ---
+kalshi-common = { path = "crates/common" }
+kalshi-ingest = { path = "crates/ingest" }
+kalshi-store  = { path = "crates/store" }
+
+# --- async runtime / transport ---
+tokio             = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures-util      = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+# `query` and `charset` became opt-in features in reqwest 0.13 (they were in
+# the default set in 0.12). Without `query`, RequestBuilder::query does not
+# exist and query parameters would have to be hand-appended to the path -- which
+# is exactly how the signing rule gets broken.
+reqwest           = { version = "0.13.4", default-features = false, features = ["rustls", "json", "query", "http2", "charset"] }
+
+# --- crypto: pinned as a compatible set. See note below. ---
+# rsa 0.9.x is built on the RustCrypto 0.10-generation traits: it requires
+# `digest 0.10`, `pkcs8 0.10`, `rand_core 0.6` and `signature 2.x`. Do NOT bump
+# sha2 to 0.11 or pkcs8 to 0.11 without also moving rsa to its 0.10 line --
+# they are different trait generations and will not link.
+rsa       = { version = "0.9.10", features = ["sha2"] }
+sha2      = "0.10.9"
+pkcs8     = { version = "0.10.2", features = ["pem"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+signature = "2.2"
+base64    = "0.23"
+
+# --- serde ---
+serde      = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+# --- storage ---
+arrow   = "59.2"
+parquet = { version = "59.2", features = ["arrow", "snap"] }
+
+# --- observability ---
+tracing            = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "time"] }
+
+# --- misc ---
+clap      = { version = "4.6", features = ["derive", "env"] }
+anyhow    = "1.0.104"
+thiserror = "2.0"
+chrono    = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+config    = { version = "0.15", default-features = false, features = ["toml"] }
+rand      = "0.10"
+
+[package]
+name        = "kalshi-alpha"
+description = "Market-data capture for Kalshi NFL prediction markets. Read-only."
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "capture"
+path = "bin/capture.rs"
+
+[dependencies]
+kalshi-common = { workspace = true }
+kalshi-ingest = { workspace = true }
+kalshi-store  = { workspace = true }
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+clap               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+chrono             = { workspace = true }
+config             = { workspace = true }
+futures-util       = { workspace = true }
+
+[profile.release]
+# Capture is a long-lived daemon handling irreplaceable data. Overflow checks stay
+# ON in release: a silent wraparound in fixed-point math would corrupt records we
+# can never re-capture, and the cost is negligible next to socket + Parquet work.
+overflow-checks = true
+debug           = 1
+# Unwind rather than abort, so `catch_unwind` in the tests still works. The
+# daemon installs a panic hook that aborts the process instead -- see
+# `install_fatal_panic_hook` in bin/capture.rs. A panic is a bug, and a bug
+# must not leave capture running in a degraded state that looks healthy.
+panic           = "unwind"
+
+# RSA key generation is unusably slow in an unoptimized build, which would make
+# the auth tests take minutes. Optimize only the bignum backend; the rest of the
+# workspace still builds with full debug info.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.test.package.num-bigint-dig]
+opt-level = 3
