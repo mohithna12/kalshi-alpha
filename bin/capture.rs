@@ -20,6 +20,8 @@
 //! overflow` error. Losing a row is bad; losing the connection and every book
 //! on it is worse.
 
+mod subcommands;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use kalshi_ingest::auth::Credentials;
@@ -230,7 +232,7 @@ struct Metrics {
 // ===========================================================================
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let config = load_config(&cli.config)?;
     init_tracing(&config.observability.log_level);
     install_fatal_panic_hook();
@@ -241,26 +243,120 @@ fn main() -> Result<()> {
         .context("building the tokio runtime")?;
 
     runtime.block_on(async move {
-        match cli.command {
+        // Take the subcommand out first so the rest of `cli` stays borrowable.
+        let command = cli.command.take();
+        match command {
             None => run_capture(cli, config).await,
+            Some(Command::VerifyPricing { market }) => {
+                let (url, credentials) = connect_context(&cli, &config)?;
+                subcommands::verify_pricing(&url, &credentials, &market, Duration::from_secs(20))
+                    .await
+            }
+            Some(Command::ProbeLimits {
+                max_subscriptions,
+                pace_ms,
+            }) => {
+                let (url, credentials) = connect_context(&cli, &config)?;
+                let markets = discover_for_probe(&cli, &config, &credentials).await?;
+                subcommands::probe_limits(
+                    &url,
+                    &credentials,
+                    &markets,
+                    max_subscriptions,
+                    Duration::from_millis(pace_ms),
+                )
+                .await
+            }
             Some(Command::ForceGap { .. }) => bail!(
-                "force-gap is not implemented yet. It needs to attach to a running \
-                 daemon; that plumbing is deliverable 9."
-            ),
-            Some(Command::ProbeLimits { .. }) => bail!(
-                "probe-limits is not implemented yet (deliverable 9). Run it \
-                 against demo before the first large NFL subscribe."
-            ),
-            Some(Command::VerifyPricing { .. }) => bail!(
-                "verify-pricing is not implemented yet (deliverable 9). It must \
-                 be run before the season to settle use_yes_price empirically."
+                "force-gap is not implemented yet. It must attach to a running \
+                 daemon to exercise the recovery ladder against live \
+                 subscriptions, which needs a control channel this binary does \
+                 not have. Until then, the ladder's logic is covered by \
+                 crates/ingest/tests/ws.rs and the invalid-window behaviour by \
+                 crates/ingest/tests/book.rs."
             ),
             Some(Command::Verify { .. }) => bail!(
-                "verify is not implemented yet (deliverable 9). The round-trip \
-                 property is covered by crates/store/tests/round_trip.rs."
+                "verify is not implemented yet. The round-trip property it would \
+                 check is enforced on every build by \
+                 crates/store/tests/round_trip.rs and \
+                 crates/store/tests/encode_round_trip.rs, which re-parse every \
+                 *_raw column with an independent parser."
             ),
         }
     })
+}
+
+/// Resolve the WebSocket URL and load credentials for a subcommand.
+///
+/// Applies the same environment gate as capture: production still requires the
+/// acknowledgement flag, because these subcommands open real connections.
+fn connect_context(cli: &Cli, config: &AppConfig) -> Result<(String, Credentials)> {
+    let env_name = match cli.env.as_str() {
+        "demo" => "demo",
+        "prod" => {
+            if !cli.i_understand_this_is_production {
+                bail!(
+                    "refusing to connect to production without \
+                     --i-understand-this-is-production"
+                );
+            }
+            "prod"
+        }
+        other => bail!("unknown environment {other:?}; expected \"demo\" or \"prod\""),
+    };
+    let endpoint = config
+        .endpoints
+        .get(env_name)
+        .with_context(|| format!("no endpoints configured for {env_name}"))?;
+    let key_path = expand_tilde(&config.auth.private_key_path);
+    let credentials = Credentials::from_pem_file(&config.auth.key_id, &key_path)
+        .with_context(|| format!("loading the private key from {}", key_path.display()))?;
+    Ok((endpoint.ws.clone(), credentials))
+}
+
+/// Discover a handful of markets to size the limit probe against.
+async fn discover_for_probe(
+    cli: &Cli,
+    config: &AppConfig,
+    credentials: &Credentials,
+) -> Result<Vec<String>> {
+    let env_name = if cli.env == "prod" { "prod" } else { "demo" };
+    let endpoint = config
+        .endpoints
+        .get(env_name)
+        .context("no endpoints configured")?;
+    let rest = RestClient::new(
+        RestConfig {
+            base_url: endpoint.rest.clone(),
+            assumed_read_refill: config.rate_limit.read_tokens_per_sec,
+            assumed_read_capacity: config.rate_limit.read_tokens_per_sec,
+            assumed_default_cost: config.rate_limit.default_request_cost,
+            ..RestConfig::default()
+        },
+        credentials.clone(),
+    )
+    .context("building the REST client")?;
+
+    let series = if cli.series.is_empty() {
+        config.discovery.series_tickers.clone()
+    } else {
+        cli.series.clone()
+    };
+    let mut markets = Vec::new();
+    for series_ticker in &series {
+        let pass = rest
+            .discover_markets(series_ticker, &config.discovery.statuses)
+            .await
+            .with_context(|| format!("discovering markets for {series_ticker}"))?;
+        markets.extend(pass.markets.into_iter().map(|m| m.ticker));
+    }
+    if markets.is_empty() {
+        bail!(
+            "discovery found no markets to probe against; pass --series with a \
+             series that currently has open markets"
+        );
+    }
+    Ok(markets)
 }
 
 fn init_tracing(level: &str) {

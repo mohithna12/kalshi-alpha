@@ -116,6 +116,12 @@ verify-pricing MARKET:
         --env prod --i-understand-this-is-production \
         verify-pricing --market {{MARKET}}
 
+# Same, against demo. Demo books are usually empty, so this proves the command
+# runs but settles nothing about the convention -- use the prod form.
+verify-pricing-demo MARKET:
+    cargo run --release --bin capture -- --env demo \
+        verify-pricing --market {{MARKET}}
+
 # Empirically measure the undocumented WebSocket caps on DEMO before depending
 # on either connection architecture: subscriptions per connection, markets per
 # subscription (error 26), and the subscribe command rate limit (error 27).

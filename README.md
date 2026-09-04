@@ -259,11 +259,15 @@ Stage 2 soak and record the answer here.**
 
 Recovery is tested deliberately, not observed:
 
+- [ ] `just verify-pricing <MARKET>` against a **production** market with
+      resting NO liquidity — settles `use_yes_price` empirically. Record the
+      answer here and set `websocket.pricing_convention` to match.
 - [ ] `just probe-limits` on demo **before** the first 200-market subscribe —
       measures subs/connection, markets/subscription, and the command rate limit
-- [ ] `just force-gap <MARKET>` — asserts a fresh snapshot arrives, the book
-      returns to valid, and **no other sid is disturbed**
-- [ ] `just force-reconnect` — same assertions via the full-reconnect path
+- [ ] `just force-gap <MARKET>` — **not yet implemented**: needs a control
+      channel into the running daemon. The ladder's logic is covered by
+      `crates/ingest/tests/ws.rs` and the invalid-window behaviour by
+      `crates/ingest/tests/book.rs`, but the live path is unexercised.
 - [ ] 60s network kill, clean recovery, no manual restart
 - [ ] ≥12 lifecycle transitions handled
 - [ ] `just soak-shard 1` vs `just soak-shard 25` — compare gap rate per sid to
@@ -294,3 +298,4 @@ just check       # fmt + clippy + test
 | 6 | `book.rs` — snapshot + gap detection (delta application stubbed) | **done** (27 pass, 13 spec red by design) |
 | 7 | `store/` — Parquet writer | pending |
 | 8 | `bin/capture.rs` — daemon wiring | **done** |
+| 9 | encoder + operational subcommands | **encoder done**; `force-gap`/`verify` pending |
