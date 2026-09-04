@@ -25,6 +25,17 @@ pub const PARSER_VERSION: u32 = 1;
 /// The git commit that produced this binary, from `build.rs`.
 pub const GIT_SHA: &str = env!("KALSHI_GIT_SHA");
 
+/// Whether the working tree had uncommitted changes at build time.
+///
+/// A production soak must run from a clean tree: the session record ties every
+/// captured row to a `git_sha`, and a `-dirty` SHA cannot be resolved back to
+/// reproducible code. Months later, "which code produced this file" would have
+/// no answer.
+#[must_use]
+pub fn build_tree_was_dirty() -> bool {
+    env!("KALSHI_GIT_DIRTY") == "true"
+}
+
 /// The date the Kalshi API documentation was read and this code written
 /// against. Kalshi's API changes; a file that records which spec it was
 /// captured under is far easier to reconcile later.

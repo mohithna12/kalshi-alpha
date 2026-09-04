@@ -291,8 +291,7 @@ fn rejects_a_malformed_key_without_echoing_it() {
     // eventually slips.
     let header = concat!("-----BEGIN ", "PRIVATE KEY-----");
     let malformed = format!("{header}\nnonsense\n");
-    let err = Credentials::from_pem("id", &malformed, "unit-test")
-        .expect_err("should not load");
+    let err = Credentials::from_pem("id", &malformed, "unit-test").expect_err("should not load");
     let rendered = format!("{err}");
     assert!(rendered.contains("unit-test"));
     assert!(

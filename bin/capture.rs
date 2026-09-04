@@ -64,6 +64,14 @@ struct Cli {
     #[arg(long)]
     i_understand_this_is_production: bool,
 
+    /// Allow production capture from a dirty working tree.
+    ///
+    /// Refused by default: the session record ties every row to a `git_sha`,
+    /// and a `-dirty` SHA cannot be resolved back to reproducible code. Use
+    /// only for a deliberate one-off, never for a soak.
+    #[arg(long)]
+    allow_dirty_tree: bool,
+
     #[arg(long, default_value = "config/default.toml")]
     config: PathBuf,
 
@@ -311,6 +319,22 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
                      deliberate."
                 );
             }
+            // The soak must be reproducible. A dirty tree means the captured
+            // data records a git_sha that resolves to nothing.
+            if kalshi_store::session::build_tree_was_dirty() && !cli.allow_dirty_tree {
+                bail!(
+                    "refusing to capture production data from a dirty working tree.\n\
+                     \n\
+                     Session metadata records git_sha as {}, which cannot be \
+                     resolved back to reproducible code -- in January there would \
+                     be no answer to \"which code produced this file\".\n\
+                     \n\
+                     Commit or stash your changes, rebuild, and retry. Pass \
+                     --allow-dirty-tree only for a deliberate one-off, never for \
+                     a soak.",
+                    kalshi_store::session::GIT_SHA
+                );
+            }
             Environment::Prod
         }
         other => bail!("unknown environment {other:?}; expected \"demo\" or \"prod\""),
@@ -430,10 +454,13 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
     let shutdown = Arc::new(tokio::sync::Notify::new());
 
     // --- tasks ------------------------------------------------------------
+    let store_stats = Arc::new(std::sync::Mutex::new(store.stats()));
     let writer = tokio::spawn(writer_task(
         store,
         receiver,
         Duration::from_secs(config.storage.flush_interval_secs),
+        config.storage.max_batch_rows,
+        Arc::clone(&store_stats),
         Arc::clone(&shutdown),
     ));
 
@@ -460,6 +487,7 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
     let reporter = tokio::spawn(metrics_task(
         Arc::clone(&metrics),
         handle.clone(),
+        Arc::clone(&store_stats),
         Duration::from_secs(config.observability.metrics_interval_secs),
         Arc::clone(&shutdown),
     ));
@@ -662,10 +690,30 @@ async fn run_connection(
 // Background tasks
 // ===========================================================================
 
+/// Group a mixed batch by channel and write each group.
+///
+/// Records arrive interleaved across channels; each Parquet file holds one
+/// channel, so they are grouped before encoding.
+fn write_grouped(store: &mut ParquetStore, records: Vec<StoreRecord>) -> Result<()> {
+    let mut by_channel: HashMap<Channel, Vec<StoreRecord>> = HashMap::new();
+    for record in records {
+        by_channel.entry(record.channel).or_default().push(record);
+    }
+    let now = chrono::Utc::now();
+    for (channel, group) in by_channel {
+        store
+            .write_records(channel, &group, now)
+            .with_context(|| format!("writing {} records", channel.as_str()))?;
+    }
+    Ok(())
+}
+
 async fn writer_task(
     mut store: ParquetStore,
     mut receiver: kalshi_store::sink::StoreReceiver,
     flush_interval: Duration,
+    max_batch_rows: usize,
+    stats: Arc<std::sync::Mutex<kalshi_store::writer::StoreStats>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(flush_interval);
@@ -681,17 +729,35 @@ async fn writer_task(
                 if let Err(err) = store.roll_due_files(chrono::Utc::now()) {
                     warn!(error = %err, "rolling due parquet files");
                 }
-            }
-            record = receiver.recv() => {
-                match record {
-                    Some(_record) => {
-                        // Batch assembly (typed column extraction per channel)
-                        // lands with the record encoders; the queue drains here
-                        // so the read loop never stalls.
-                    }
-                    None => break,
+                if let Ok(mut shared) = stats.lock() {
+                    *shared = store.stats();
                 }
             }
+            record = receiver.recv() => {
+                let Some(record) = record else { break };
+                // Drain whatever else is queued so the encoder works in
+                // batches rather than one row at a time.
+                let mut batch = vec![record];
+                batch.extend(receiver.drain(max_batch_rows.saturating_sub(1)));
+                if let Err(err) = write_grouped(&mut store, batch) {
+                    // A write failure must not kill the writer: the read loop
+                    // depends on this task staying alive to drain the queue,
+                    // and a dead writer turns into a terminal buffer overflow.
+                    error!(error = %err, "writing a batch failed; continuing to drain");
+                }
+            }
+        }
+    }
+
+    // Drain anything still queued before closing: SIGINT must not lose
+    // buffered rows.
+    loop {
+        let remaining = receiver.drain(max_batch_rows);
+        if remaining.is_empty() {
+            break;
+        }
+        if let Err(err) = write_grouped(&mut store, remaining) {
+            error!(error = %err, "writing the final batch failed");
         }
     }
 
@@ -700,6 +766,9 @@ async fn writer_task(
     store
         .close_all(chrono::Utc::now())
         .context("closing the Parquet store on shutdown")?;
+    if let Ok(mut shared) = stats.lock() {
+        *shared = store.stats();
+    }
     let stats = store.stats();
     info!(?stats, "writer stopped");
     Ok(())
@@ -791,6 +860,7 @@ async fn heartbeat_task(path: PathBuf, interval: Duration, shutdown: Arc<tokio::
 async fn metrics_task(
     metrics: Arc<Metrics>,
     handle: kalshi_store::sink::StoreHandle,
+    store_stats: Arc<std::sync::Mutex<kalshi_store::writer::StoreStats>>,
     interval: Duration,
     shutdown: Arc<tokio::sync::Notify>,
 ) {
@@ -804,6 +874,28 @@ async fn metrics_task(
                 let rate = (messages - previous_messages) as f64 / interval.as_secs_f64();
                 previous_messages = messages;
                 let sink = handle.metrics().snapshot();
+                let store = store_stats.lock().map(|s| *s).unwrap_or(
+                    kalshi_store::writer::StoreStats {
+                        open_files: 0,
+                        files_closed: 0,
+                        rows_written: 0,
+                        bytes_written: 0,
+                        records_dequeued: 0,
+                        rows_expected: 0,
+                    },
+                );
+                // rows_lost must be zero. It is the check that would have
+                // caught the encoder gap, where 100% of dequeued records were
+                // discarded and nothing in the output said so.
+                let rows_lost = store.rows_lost();
+                if rows_lost != 0 {
+                    error!(
+                        rows_lost,
+                        rows_expected = store.rows_expected,
+                        rows_written = store.rows_written,
+                        "rows are being lost between the queue and disk"
+                    );
+                }
                 info!(
                     messages_per_sec = rate,
                     messages_total = messages,
@@ -818,6 +910,12 @@ async fn metrics_task(
                     queue_depth = handle.queue_depth(),
                     queue_capacity = handle.capacity(),
                     rows_dropped = sink.dropped,
+                    records_dequeued = store.records_dequeued,
+                    rows_expected = store.rows_expected,
+                    rows_written = store.rows_written,
+                    rows_lost,
+                    files_closed = store.files_closed,
+                    open_files = store.open_files,
                     "metrics"
                 );
             }

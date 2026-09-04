@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod encode;
 pub mod grid_history;
 pub mod quarantine;
 pub mod schema;
@@ -16,6 +17,7 @@ pub mod session;
 pub mod sink;
 pub mod writer;
 
+pub use encode::{encode, expected_rows};
 pub use grid_history::{GridHistory, GridSource, GridVerdict};
 pub use schema::{Channel, DualColumn, Scale};
 pub use session::{Environment, SessionMetadata};

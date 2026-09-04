@@ -25,6 +25,10 @@ fn main() {
         .map(|out| !out.stdout.is_empty())
         .unwrap_or(false);
 
+    // Exposed separately from the SHA so the daemon can refuse to run against
+    // production from a dirty tree: data captured under a `-dirty` SHA cannot
+    // be tied back to reproducible code.
+    println!("cargo:rustc-env=KALSHI_GIT_DIRTY={dirty}");
     let sha = if dirty { format!("{sha}-dirty") } else { sha };
     println!("cargo:rustc-env=KALSHI_GIT_SHA={sha}");
 }

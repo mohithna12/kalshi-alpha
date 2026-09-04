@@ -50,6 +50,11 @@ pub enum WriteError {
     },
     #[error("serializing session metadata")]
     SerializeSession(#[source] serde_json::Error),
+    #[error("encoding records to an arrow batch")]
+    Encode {
+        #[source]
+        source: crate::encode::EncodeError,
+    },
     #[error("parquet error on {path}")]
     Parquet {
         path: String,
@@ -113,6 +118,14 @@ pub struct ParquetStore {
     files_closed: u64,
     rows_written: u64,
     bytes_written: u64,
+    /// Records taken off the queue. Compared against `rows_written` in the
+    /// metrics line: a divergence means rows are being silently discarded
+    /// between dequeue and disk, which is exactly how the encoder gap went
+    /// unnoticed. They will not be equal (a snapshot fans out to one row per
+    /// price level), which is why `rows_expected` exists alongside.
+    records_dequeued: u64,
+    /// Rows the encoder should have produced from those records.
+    rows_expected: u64,
 }
 
 impl ParquetStore {
@@ -146,6 +159,8 @@ impl ParquetStore {
             files_closed: 0,
             rows_written: 0,
             bytes_written: 0,
+            records_dequeued: 0,
+            rows_expected: 0,
         })
     }
 
@@ -372,6 +387,35 @@ impl ParquetStore {
         }
     }
 
+    /// Encode a batch of records for one channel and write the result.
+    ///
+    /// This is the only path from a wire message to disk. It records what it
+    /// dequeued and what it expected to produce, so the metrics line can prove
+    /// nothing is being dropped in between.
+    pub fn write_records(
+        &mut self,
+        channel: Channel,
+        records: &[crate::sink::StoreRecord],
+        at: DateTime<Utc>,
+    ) -> Result<usize, WriteError> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        self.records_dequeued += u64::try_from(records.len()).unwrap_or(0);
+        self.rows_expected +=
+            u64::try_from(crate::encode::expected_rows(channel, records)).unwrap_or(0);
+
+        let session_id = self.session.session_id.clone();
+        let batch = crate::encode::encode(channel, &session_id, records)
+            .map_err(|source| WriteError::Encode { source })?;
+        let Some(batch) = batch else {
+            return Ok(0);
+        };
+        let rows = batch.num_rows();
+        self.write_batch(channel, &batch, at)?;
+        Ok(rows)
+    }
+
     #[must_use]
     pub fn stats(&self) -> StoreStats {
         StoreStats {
@@ -379,6 +423,8 @@ impl ParquetStore {
             files_closed: self.files_closed,
             rows_written: self.rows_written,
             bytes_written: self.bytes_written,
+            records_dequeued: self.records_dequeued,
+            rows_expected: self.rows_expected,
         }
     }
 }
@@ -389,4 +435,19 @@ pub struct StoreStats {
     pub files_closed: u64,
     pub rows_written: u64,
     pub bytes_written: u64,
+    pub records_dequeued: u64,
+    pub rows_expected: u64,
+}
+
+impl StoreStats {
+    /// Rows the encoder should have produced but did not.
+    ///
+    /// **Must be zero.** A non-zero value means rows are vanishing between the
+    /// queue and disk. The encoder gap this counter was added for showed a 100%
+    /// loss and nothing in the output would have revealed it.
+    #[must_use]
+    pub fn rows_lost(&self) -> i64 {
+        i64::try_from(self.rows_expected).unwrap_or(i64::MAX)
+            - i64::try_from(self.rows_written).unwrap_or(i64::MAX)
+    }
 }
