@@ -6,6 +6,7 @@ default:
 
 # Install the repository's git hooks. REQUIRED after cloning: hooks live in
 # .git/hooks, which is not part of the repository, so they do not clone.
+# Install git hooks. Run once after cloning.
 setup:
     git config core.hooksPath .githooks
     @echo "git hooks installed from .githooks/"
@@ -16,6 +17,7 @@ setup:
 #
 # The decoy marker is assembled from fragments so this file does not itself
 # trip the hook -- the same discipline the hook's own source follows.
+# Prove the pre-commit hook refuses key material and passes a clean tree.
 verify-hooks:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -40,6 +42,7 @@ build:
 
 # Everything except the delta specification, which is red by design until
 # `apply_delta` is implemented. This is the target to watch for regressions.
+# Run the suite, skipping the delta spec. THIS is the commit gate.
 test:
     cargo test --workspace -- --skip delta_spec_
 
@@ -47,10 +50,12 @@ test:
 # until that function is written -- each failure names a behaviour that has to
 # be decided deliberately. Implement until this is green, then `just test`
 # stays green too.
+# The delta specification. Red until apply_delta is implemented.
 spec:
     cargo test --workspace delta_spec_ -- --nocapture
 
 # Absolutely everything, including the red spec.
+# Everything, including the red delta spec.
 test-all:
     cargo test --workspace
 
@@ -61,16 +66,19 @@ clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
 # Everything CI runs.
+# Everything CI runs.
 check: fmt clippy test
     cargo fmt --all -- --check
 
 # Demo environment. Synthetic prices and near-zero activity: this proves
 # protocol correctness, not reliability.
+# Capture against demo. Proves protocol correctness, not reliability.
 run-demo:
     KALSHI_ENV=demo cargo run --release --bin capture -- --env demo
 
 # Production, READ-ONLY. The acknowledgement flag exists to make the switch
 # deliberate; production read-only capture is expected and safe.
+# Capture against production, read-only. Refuses a dirty tree.
 run-prod:
     KALSHI_ENV=prod cargo run --release --bin capture -- \
         --env prod --i-understand-this-is-production
@@ -78,6 +86,7 @@ run-prod:
 # Stage 2 soak target: short-horizon crypto series spawn a new event every
 # 15 minutes, giving both a high delta rate and constant lifecycle churn.
 # August NFL has almost no activity and proves nothing.
+# Stage 2 soak against high-churn crypto series.
 soak:
     KALSHI_ENV=prod cargo run --release --bin capture -- \
         --env prod --i-understand-this-is-production \
@@ -94,6 +103,7 @@ soak:
 #   4. assert that book returns to valid
 #   5. assert NO other sid was invalidated or lost a message
 # Exits non-zero on any failed assertion, so it can gate the soak.
+# NOT IMPLEMENTED: needs a control channel into the running daemon.
 force-gap MARKET:
     cargo run --release --bin capture -- force-gap --market {{MARKET}} \
         --mode all --assert-snapshot --assert-isolation --timeout-secs 15
@@ -103,6 +113,7 @@ force-gap MARKET:
 #   get-snapshot -- update_subscription action:get_snapshot. No sid churn.
 #   resubscribe  -- unsubscribe + subscribe. New sid, old counter discarded.
 #   reconnect    -- full teardown. Every sid replaced.
+# NOT IMPLEMENTED: one rung of the recovery ladder in isolation.
 force-gap-rung MARKET RUNG:
     cargo run --release --bin capture -- force-gap --market {{MARKET}} \
         --mode {{RUNG}} --assert-snapshot --assert-isolation --timeout-secs 60
@@ -111,6 +122,7 @@ force-gap-rung MARKET RUNG:
 # committing to one for the season. Subscribes the same market twice, once with
 # use_yes_price:false and once with true, and prints both books side by side so
 # (side, price) can be read off rather than inferred.
+# Settle use_yes_price empirically against a live market.
 verify-pricing MARKET:
     KALSHI_ENV=prod cargo run --release --bin capture -- \
         --env prod --i-understand-this-is-production \
@@ -118,6 +130,7 @@ verify-pricing MARKET:
 
 # Same, against demo. Demo books are usually empty, so this proves the command
 # runs but settles nothing about the convention -- use the prod form.
+# Same, against demo. Demo books are usually empty; settles little.
 verify-pricing-demo MARKET:
     cargo run --release --bin capture -- --env demo \
         verify-pricing --market {{MARKET}}
@@ -126,6 +139,7 @@ verify-pricing-demo MARKET:
 # on either connection architecture: subscriptions per connection, markets per
 # subscription (error 26), and the subscribe command rate limit (error 27).
 # Run this before the first 200-market NFL subscribe, not during it.
+# Measure the undocumented WebSocket subscription limits.
 probe-limits:
     KALSHI_ENV=demo cargo run --release --bin capture -- probe-limits \
         --max-subscriptions 512 --pace-ms 25
@@ -134,6 +148,7 @@ probe-limits:
 # market but costs one subscription each; larger shards are cheaper but widen
 # the blast radius. The 60s metrics line reports gap rate per sid so this can be
 # decided on data rather than on caution.
+# A/B the orderbook shard size during a soak.
 soak-shard N:
     KALSHI_ENV=prod cargo run --release --bin capture -- \
         --env prod --i-understand-this-is-production \
@@ -146,6 +161,7 @@ soak-shard N:
 #
 # This is the check that matters most before the season: 169 unit tests cover
 # parsing, encoding and storage, and cover the network path not at all.
+# PREFLIGHT: run this before any real capture. Proves the full path works.
 preflight SECONDS="90":
     #!/usr/bin/env bash
     set -uo pipefail
@@ -210,6 +226,7 @@ preflight SECONDS="90":
 
 # Offline verification of captured data: re-parses every raw column with an
 # independent parser and reports per-sid sequence gaps.
+# Verify captured data offline: re-parse raw columns, report per-sid gaps.
 readback DAY="":
     #!/usr/bin/env bash
     if [ -n "{{DAY}}" ]; then
@@ -220,5 +237,6 @@ readback DAY="":
 
 # Verify captured Parquet round-trips: re-parsing every *_raw column must
 # reproduce its stored integer column.
+# NOT IMPLEMENTED: use `just readback` instead.
 verify-parquet DAY:
     cargo run --release --bin capture -- verify --day {{DAY}}
