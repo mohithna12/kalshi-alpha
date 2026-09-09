@@ -139,6 +139,85 @@ soak-shard N:
         --env prod --i-understand-this-is-production \
         --series KXBTCD --series KXETHD --orderbook-shard-size {{N}}
 
+# --- Pre-flight ---------------------------------------------------------
+
+# Everything that must be true before a real capture run. Runs the daemon
+# against demo for a fixed window, then verifies what landed on disk.
+#
+# This is the check that matters most before the season: 169 unit tests cover
+# parsing, encoding and storage, and cover the network path not at all.
+preflight SECONDS="90":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "=== 1. credentials ==="
+    key="${KALSHI_AUTH__PRIVATE_KEY_PATH:-$HOME/.kalshi/kalshi-private-key.pem}"
+    if [ ! -f "$key" ]; then
+        echo "FAIL  no private key at $key"; exit 1
+    fi
+    perms=$(stat -f '%Lp' "$key" 2>/dev/null || stat -c '%a' "$key")
+    if [ "$perms" != "600" ]; then
+        echo "WARN  key is mode $perms; chmod 600 $key"
+    fi
+    if [ -z "${KALSHI_AUTH__KEY_ID:-}" ]; then
+        echo "FAIL  KALSHI_AUTH__KEY_ID is not set"; exit 1
+    fi
+    echo "  ok  key present, key id set"
+
+    echo "=== 2. build ==="
+    cargo build --release --bin capture 2>&1 | tail -1
+
+    echo "=== 3. capture against demo for {{SECONDS}}s ==="
+    rm -f data/.preflight.log
+    mkdir -p data
+    KALSHI_ENV=demo ./target/release/capture --env demo > data/.preflight.log 2>&1 &
+    pid=$!
+    sleep {{SECONDS}}
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "FAIL  daemon exited early:"; tail -20 data/.preflight.log; exit 1
+    fi
+    kill -INT "$pid"
+    # Shutdown must flush and write every footer.
+    for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "FAIL  daemon did not exit within 30s of SIGINT"; kill -9 "$pid"; exit 1
+    fi
+    echo "  ok  started, ran {{SECONDS}}s, exited on SIGINT"
+
+    echo "=== 4. startup checks from the log ==="
+    grep -q '"message":"websocket connected and authenticated"' data/.preflight.log \
+        && echo "  ok  authenticated" \
+        || { echo "FAIL  never authenticated"; grep -i 'error\|refus' data/.preflight.log | head -5; exit 1; }
+    markets=$(grep -o '"markets":[0-9]*' data/.preflight.log | head -1 | cut -d: -f2)
+    echo "  ..  discovery found ${markets:-0} markets"
+    if [ "${markets:-0}" = "0" ]; then
+        echo "WARN  discovery found no markets -- check discovery.series_tickers"
+    fi
+    grep -q 'clock skew' data/.preflight.log && \
+        echo "  ..  $(grep -o '"delta_ms":[-0-9]*' data/.preflight.log | head -1)"
+
+    echo "=== 5. rows reached disk ==="
+    lost=$(grep -o '"rows_lost":[-0-9]*' data/.preflight.log | tail -1 | cut -d: -f2)
+    echo "  ..  rows_lost=${lost:-n/a}"
+    if [ -n "${lost:-}" ] && [ "${lost}" != "0" ]; then
+        echo "FAIL  rows are being lost between the queue and disk"; exit 1
+    fi
+
+    echo "=== 6. read back what was written ==="
+    python3 scripts/readback.py data || exit 1
+
+    echo
+    echo "PREFLIGHT PASSED"
+
+# Offline verification of captured data: re-parses every raw column with an
+# independent parser and reports per-sid sequence gaps.
+readback DAY="":
+    #!/usr/bin/env bash
+    if [ -n "{{DAY}}" ]; then
+        python3 scripts/readback.py data --date {{DAY}}
+    else
+        python3 scripts/readback.py data
+    fi
+
 # Verify captured Parquet round-trips: re-parsing every *_raw column must
 # reproduce its stored integer column.
 verify-parquet DAY:
