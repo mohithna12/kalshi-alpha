@@ -16,9 +16,16 @@ data/
 **/*.rs.bk
 
 # --- Local operational state ---
+# Runtime artifacts of a capture run. These churn on every start and belong to
+# the machine, not the repository. capture.log was tracked once by accident --
+# it was clean (INFO-level operational output only, no credentials), but it has
+# no business in version control.
 *.heartbeat
 heartbeat
 logs/
+*.log
+*.pid
+.watchdog.log
 
 # --- Editor / OS ---
 .DS_Store
