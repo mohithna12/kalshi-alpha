@@ -204,6 +204,7 @@ def main():
     all_mismatches = []
     sessions = set()
     unreadable = []
+    open_now = []
     # seq is per-sid and spans every channel of that subscription, so
     # continuity is accumulated globally and checked once at the end.
     seq_by_sid = defaultdict(set)
@@ -213,6 +214,16 @@ def main():
         for part in path.split(os.sep):
             if part in DUAL or part in ("event_fee_update", "price_ranges", "unparsed"):
                 channel = part
+        # A file the daemon is writing right now has no footer yet and reads
+        # as 0 bytes. That is correct behaviour, not damage: the footer lands
+        # when the file rolls. Skipping it keeps a live capture from looking
+        # broken, while a non-empty file that will not open is still reported.
+        try:
+            if os.path.getsize(path) == 0:
+                open_now.append(path)
+                continue
+        except OSError:
+            pass
         try:
             pf = pq.ParquetFile(path)
             table = pf.read()
@@ -254,6 +265,10 @@ def main():
     print()
 
     ok = True
+
+    if open_now:
+        print(f"note: {len(open_now)} file(s) are still being written and were "
+              f"skipped;\n      their footers land when the file rolls.\n")
 
     if unreadable:
         ok = False
