@@ -40,6 +40,16 @@ verify-hooks:
 build:
     cargo build --workspace --all-targets
 
+# Build the capture binary once, up front.
+#
+# The long-running recipes execute ./target/release/capture directly rather
+# than going through `cargo run`. Two reasons: `cargo run` needs cargo on PATH
+# at launch time (it is not there by default -- rustup was installed with
+# --no-modify-path), and it can decide to rebuild mid-session, which for a
+# capture daemon means an unplanned restart during a game.
+build-release:
+    cargo build --release --bin capture
+
 # Everything except the delta specification, which is red by design until
 # `apply_delta` is implemented. This is the target to watch for regressions.
 # Run the suite, skipping the delta spec. THIS is the commit gate.
@@ -73,14 +83,14 @@ check: fmt clippy test
 # Demo environment. Synthetic prices and near-zero activity: this proves
 # protocol correctness, not reliability.
 # Capture against demo. Proves protocol correctness, not reliability.
-run-demo:
-    KALSHI_ENV=demo cargo run --release --bin capture -- --env demo
+run-demo: build-release
+    KALSHI_ENV=demo ./target/release/capture --env demo
 
 # Production, READ-ONLY. The acknowledgement flag exists to make the switch
 # deliberate; production read-only capture is expected and safe.
 # Capture against production, read-only. Refuses a dirty tree.
-run-prod:
-    KALSHI_ENV=prod cargo run --release --bin capture -- \
+run-prod: build-release
+    KALSHI_ENV=prod ./target/release/capture \
         --env prod --i-understand-this-is-production
 
 # Stage 2 soak target: short-horizon crypto series spawn a new event every

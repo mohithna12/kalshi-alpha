@@ -1,0 +1,3 @@
+KALSHI_ENV=prod cargo run --release --bin capture -- --env prod --i-understand-this-is-production
+sh: cargo: command not found
+error: recipe `run-prod` failed on line 84 with exit code 127
