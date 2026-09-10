@@ -37,6 +37,15 @@ pub enum Channel {
     PriceRanges,
     /// Anything that failed to deserialize. Never dropped.
     Unparsed,
+    /// Subscription control frames: `subscribed`, `unsubscribed`, `ok`,
+    /// `error`.
+    ///
+    /// These carry no market data, but they DO consume sequence numbers on
+    /// their sid. Discarding them punches holes in the seq stream that look
+    /// exactly like dropped market data, so gap detection cannot tell a real
+    /// loss from a routine acknowledgement. Storing them makes the stream
+    /// complete and gaps unambiguous.
+    Control,
 }
 
 impl Channel {
@@ -51,11 +60,12 @@ impl Channel {
             Channel::EventFeeUpdate => "event_fee_update",
             Channel::PriceRanges => "price_ranges",
             Channel::Unparsed => "unparsed",
+            Channel::Control => "control",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Channel; 8] {
+    pub const fn all() -> [Channel; 9] {
         [
             Channel::OrderbookSnapshot,
             Channel::OrderbookDelta,
@@ -65,6 +75,7 @@ impl Channel {
             Channel::EventFeeUpdate,
             Channel::PriceRanges,
             Channel::Unparsed,
+            Channel::Control,
         ]
     }
 
@@ -79,6 +90,7 @@ impl Channel {
             Channel::EventFeeUpdate => event_fee_update_schema(),
             Channel::PriceRanges => price_ranges_schema(),
             Channel::Unparsed => unparsed_schema(),
+            Channel::Control => control_schema(),
         }
     }
 
@@ -115,7 +127,10 @@ impl Channel {
                     "settlement_value_micros",
                 )]
             }
-            Channel::EventFeeUpdate | Channel::PriceRanges | Channel::Unparsed => vec![],
+            Channel::EventFeeUpdate
+            | Channel::PriceRanges
+            | Channel::Unparsed
+            | Channel::Control => vec![],
         }
     }
 }
@@ -308,6 +323,17 @@ fn price_ranges_schema() -> Arc<Schema> {
         // Content hash, so a change is detectable without re-parsing.
         Field::new("price_ranges_hash", DataType::Utf8, false),
         Field::new("band_count", DataType::Int32, true),
+    ])
+}
+
+/// Subscription control frames. Stored so the per-sid sequence stream is
+/// complete and gap detection is unambiguous.
+fn control_schema() -> Arc<Schema> {
+    schema_with(vec![
+        Field::new("message_type", DataType::Utf8, true),
+        Field::new("channel", DataType::Utf8, true),
+        Field::new("error_code", DataType::Int32, true),
+        Field::new("error_message", DataType::Utf8, true),
     ])
 }
 

@@ -199,8 +199,17 @@ fn load_config(path: &std::path::Path) -> Result<AppConfig> {
     config::Config::builder()
         .add_source(config::File::from(path.to_path_buf()))
         // KALSHI_AUTH__KEY_ID overrides auth.key_id, and so on.
+        //
+        // `prefix_separator` is set explicitly: without it the `config` crate
+        // reuses `separator` for the prefix too, so it would look for
+        // KALSHI__AUTH__KEY_ID (double underscore) and silently ignore the
+        // single-underscore form this project documents. The failure mode is
+        // nasty -- the value is simply absent, the empty default from the TOML
+        // wins, and the first symptom is a 401 whose body names neither the key
+        // nor the path.
         .add_source(
             config::Environment::with_prefix("KALSHI")
+                .prefix_separator("_")
                 .separator("__")
                 .try_parsing(true),
         )
@@ -308,6 +317,9 @@ fn connect_context(cli: &Cli, config: &AppConfig) -> Result<(String, Credentials
         .endpoints
         .get(env_name)
         .with_context(|| format!("no endpoints configured for {env_name}"))?;
+    if config.auth.key_id.trim().is_empty() {
+        bail!("auth.key_id is empty; set KALSHI_AUTH__KEY_ID");
+    }
     let key_path = expand_tilde(&config.auth.private_key_path);
     let credentials = Credentials::from_pem_file(&config.auth.key_id, &key_path)
         .with_context(|| format!("loading the private key from {}", key_path.display()))?;
@@ -490,6 +502,22 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
     );
 
     // --- credentials ------------------------------------------------------
+    //
+    // Validate before use. An empty key id is accepted by the signer and
+    // produces a KALSHI-ACCESS-KEY header of "", which the exchange rejects
+    // with a bare "token authentication failure" that names nothing. Catch it
+    // here, where the cause can actually be stated.
+    if config.auth.key_id.trim().is_empty() {
+        bail!(
+            "auth.key_id is empty. Set it with:\n\
+             \n\
+             \x20   export KALSHI_AUTH__KEY_ID=\"<your-key-id-uuid>\"\n\
+             \n\
+             It is the UUID shown beside your key in Kalshi's API settings, not \
+             the key file. Without it every authenticated request returns 401 \
+             with a message that names neither the key nor the path."
+        );
+    }
     let key_path = expand_tilde(&config.auth.private_key_path);
     let credentials = Credentials::from_pem_file(&config.auth.key_id, &key_path)
         .with_context(|| format!("loading the private key from {}", key_path.display()))?;
@@ -755,7 +783,12 @@ async fn run_connection(
                         Channel::MarketLifecycle
                     }
                     Some(ServerMessage::EventFeeUpdate(_)) => Channel::EventFeeUpdate,
-                    Some(_) => continue, // control frames carry no row
+                    // Control frames (subscribed / unsubscribed / ok / error)
+                    // consume sequence numbers on their sid. Dropping them
+                    // leaves holes in the seq stream that are indistinguishable
+                    // from real message loss, which makes gap detection
+                    // unusable. They are cheap; store them.
+                    Some(_) => Channel::Control,
                     None => {
                         metrics.unparsed.fetch_add(1, Ordering::Relaxed);
                         Channel::Unparsed
@@ -765,11 +798,22 @@ async fn run_connection(
                 // Non-blocking by construction. `offer` is a synchronous fn and
                 // must never become async: a suspension point here would stop
                 // Pongs and earn a terminal buffer-overflow error.
+                // The encoder reads every typed column out of `parsed`, so
+                // leaving it None writes rows whose columns are all empty --
+                // exactly what happened on the first live run. Only
+                // `raw_message` survived, which is the reason that column
+                // exists, but the typed columns were useless.
+                //
+                // Parsed as a generic Value rather than reusing the typed
+                // `ServerMessage`: a message whose shape we do not model must
+                // still be encoded field-for-field, and Value keeps whatever
+                // the exchange actually sent.
+                let parsed = serde_json::from_str::<serde_json::Value>(&received.raw).ok();
                 match handle.offer(StoreRecord {
                     channel,
                     received_at: received.received_at,
                     raw: received.raw,
-                    parsed: None,
+                    parsed,
                 }) {
                     Offered::Queued | Offered::Dropped => {}
                     Offered::WriterGone => {
@@ -839,7 +883,9 @@ async fn writer_task(
                     // A write failure must not kill the writer: the read loop
                     // depends on this task staying alive to drain the queue,
                     // and a dead writer turns into a terminal buffer overflow.
-                    error!(error = %err, "writing a batch failed; continuing to drain");
+                    // `{err:#}` prints the whole anyhow chain -- the outer
+                    // context alone names the channel but not the cause.
+                    error!(error = format!("{err:#}"), "writing a batch failed; continuing to drain");
                 }
             }
         }

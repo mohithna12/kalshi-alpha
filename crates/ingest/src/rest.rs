@@ -594,6 +594,21 @@ pub struct RestClient {
     credentials: Credentials,
     limiter: RateLimiter,
     default_cost: std::sync::atomic::AtomicU32,
+    /// Path component of `base_url`, e.g. `/trade-api/v2`.
+    ///
+    /// # Signatures cover the FULL path, prefix included
+    ///
+    /// Kalshi's documented example signs
+    /// `/trade-api/v2/portfolio/balance` and issues the request against
+    /// `base_url + path` where `base_url` is only the host. Because this
+    /// client keeps the version prefix inside `base_url`, the prefix has to be
+    /// re-attached before signing -- otherwise we sign `/account/limits` while
+    /// the server verifies `/trade-api/v2/account/limits`, and every
+    /// authenticated call fails with a bare 401 that names nothing.
+    ///
+    /// Found by calling the API: unauthenticated endpoints worked and every
+    /// authenticated one returned `token_authentication_failure`.
+    signing_prefix: String,
 }
 
 impl RestClient {
@@ -608,13 +623,22 @@ impl RestClient {
             })?;
         let limiter = RateLimiter::new(config.assumed_read_refill, config.assumed_read_capacity);
         let default_cost = std::sync::atomic::AtomicU32::new(config.assumed_default_cost);
+        let signing_prefix = signing_prefix_from(&config.base_url);
         Ok(RestClient {
             http,
             config,
             credentials,
             limiter,
             default_cost,
+            signing_prefix,
         })
+    }
+
+    /// The exact string signed for `path`: the base URL's path component
+    /// followed by the endpoint path, with no query string.
+    #[must_use]
+    pub fn signing_path(&self, path: &str) -> String {
+        format!("{}{}", self.signing_prefix, path)
     }
 
     fn cost(&self) -> u32 {
@@ -636,13 +660,26 @@ impl RestClient {
             // by the same bucket. There is no bypass.
             self.limiter.acquire(self.cost()).await;
 
-            let headers =
-                self.credentials
-                    .sign_rest("GET", path)
-                    .map_err(|source| RestError::Auth {
-                        path: path.to_owned(),
-                        source,
-                    })?;
+            // Sign the FULL path, including the /trade-api/v2 prefix carried in
+            // base_url. Signing the bare endpoint path produces a 401 whose
+            // body says only "token authentication failure" -- it names neither
+            // the key nor the path, so the cause is invisible from the error.
+            let signed_path = self.signing_path(path);
+            // The 401 body says only "token authentication failure" -- it names
+            // neither the key nor the path, so without this the cause of an
+            // auth failure is invisible. Logged at DEBUG; contains no secret.
+            debug!(
+                signed_path,
+                key_id = self.credentials.key_id(),
+                "signing request"
+            );
+            let headers = self
+                .credentials
+                .sign_rest("GET", &signed_path)
+                .map_err(|source| RestError::Auth {
+                    path: path.to_owned(),
+                    source,
+                })?;
 
             let url = format!("{}{}", self.config.base_url, path);
             let mut request = self.http.get(&url);
@@ -819,45 +856,66 @@ impl RestClient {
         let mut cursors = Vec::new();
         let mut markets = Vec::new();
         let mut raw_markets = Vec::new();
-        let mut cursor = String::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        loop {
-            cursors.push(cursor.clone());
-            let mut query = vec![
-                ("series_ticker", series_ticker.to_owned()),
-                // series_ticker requires mve_filter=exclude per the docs.
-                ("mve_filter", "exclude".to_owned()),
-                ("limit", "1000".to_owned()),
-            ];
-            if !statuses.is_empty() {
-                query.push(("status", statuses.join(",")));
-            }
-            if !cursor.is_empty() {
-                query.push(("cursor", cursor.clone()));
-            }
+        // `GET /markets` accepts only ONE status per request -- supplying a
+        // comma-joined list is rejected with
+        //   400 bad_request "only one status filter may be supplied"
+        // The docs list the accepted values but do not say they are mutually
+        // exclusive; this was found by calling the endpoint. So each status is
+        // crawled separately and the results merged, de-duplicated by ticker.
+        //
+        // An empty status list means "no filter", which is a single crawl.
+        let passes: Vec<Option<&String>> = if statuses.is_empty() {
+            vec![None]
+        } else {
+            statuses.iter().map(Some).collect()
+        };
 
-            let (page, _meta) = self
-                .get_json::<GetMarketsResponse>("/markets", &query)
-                .await?;
+        for status in passes {
+            let mut cursor = String::new();
+            loop {
+                cursors.push(cursor.clone());
+                let mut query = vec![
+                    ("series_ticker", series_ticker.to_owned()),
+                    // series_ticker requires mve_filter=exclude per the docs.
+                    ("mve_filter", "exclude".to_owned()),
+                    ("limit", "1000".to_owned()),
+                ];
+                if let Some(status) = status {
+                    query.push(("status", (*status).clone()));
+                }
+                if !cursor.is_empty() {
+                    query.push(("cursor", cursor.clone()));
+                }
 
-            for value in page.markets {
-                match serde_json::from_value::<Market>(value.clone()) {
-                    Ok(market) => {
-                        markets.push(market);
-                        raw_markets.push(value);
-                    }
-                    Err(err) => {
-                        // One unparsable market must not abort discovery of the
-                        // rest -- and the raw JSON is kept regardless.
-                        warn!(error = %err, "skipping unparsable market in discovery page");
+                let (page, _meta) = self
+                    .get_json::<GetMarketsResponse>("/markets", &query)
+                    .await?;
+
+                for value in page.markets {
+                    match serde_json::from_value::<Market>(value.clone()) {
+                        Ok(market) => {
+                            // A market can appear under more than one status
+                            // pass if it transitions mid-crawl.
+                            if seen.insert(market.ticker.clone()) {
+                                markets.push(market);
+                                raw_markets.push(value);
+                            }
+                        }
+                        Err(err) => {
+                            // One unparsable market must not abort discovery of
+                            // the rest -- and the raw JSON is kept regardless.
+                            warn!(error = %err, "skipping unparsable market in discovery page");
+                        }
                     }
                 }
-            }
 
-            if page.cursor.is_empty() {
-                break;
+                if page.cursor.is_empty() {
+                    break;
+                }
+                cursor = page.cursor;
             }
-            cursor = page.cursor;
         }
 
         let finished_at = Utc::now();
@@ -916,6 +974,22 @@ pub fn observations_from_discovery(pass: &DiscoveryPass) -> Vec<PriceRangeObserv
         });
     }
     out
+}
+
+/// Extract the path component of a base URL, e.g.
+/// `https://external-api.kalshi.com/trade-api/v2` -> `/trade-api/v2`.
+///
+/// Returns an empty string when the base URL is bare host-only, so a client
+/// configured with the prefix already stripped still signs correctly.
+#[must_use]
+pub fn signing_prefix_from(base_url: &str) -> String {
+    let without_scheme = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    match without_scheme.find('/') {
+        Some(index) => without_scheme[index..].trim_end_matches('/').to_owned(),
+        None => String::new(),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

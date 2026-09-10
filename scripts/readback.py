@@ -112,6 +112,37 @@ def check_round_trip(table, channel):
     return checked, mismatches
 
 
+def check_sequences_global(per_sid):
+    """Per-sid continuity, merged across every channel.
+
+    `seq` is scoped to the subscription id, and one subscription covers all the
+    channels it was opened with -- so a single sid's sequence numbers are split
+    across orderbook_delta, orderbook_snapshot, ticker, trade and control files.
+    Checking any one file in isolation reports enormous phantom gaps.
+
+    Control frames (subscribed / ok / unsubscribed) also consume sequence
+    numbers. The daemon stores them for exactly this reason; if they were
+    dropped, every acknowledgement would look like message loss.
+    """
+    gaps = []
+    summary = {}
+    for sid, values in per_sid.items():
+        ordered = sorted(values)
+        if not ordered:
+            continue
+        missing = 0
+        for a, b in zip(ordered, ordered[1:]):
+            if b != a + 1:
+                missing += b - a - 1
+                gaps.append((sid, a, b, b - a - 1))
+        summary[sid] = {
+            "messages": len(values),
+            "range": (ordered[0], ordered[-1]),
+            "missing": missing,
+        }
+    return summary, gaps
+
+
 def check_sequences(table):
     """Per-sid sequence continuity.
 
@@ -171,9 +202,11 @@ def main():
 
     totals = defaultdict(int)
     all_mismatches = []
-    all_gaps = []
     sessions = set()
     unreadable = []
+    # seq is per-sid and spans every channel of that subscription, so
+    # continuity is accumulated globally and checked once at the end.
+    seq_by_sid = defaultdict(set)
 
     for path in files:
         channel = None
@@ -200,9 +233,12 @@ def main():
         totals["_checked"] += checked
         all_mismatches.extend((path, *m) for m in mismatches)
 
-        if channel in ("orderbook_delta", "orderbook_snapshot"):
-            _, gaps = check_sequences(table)
-            all_gaps.extend((path, *g) for g in gaps)
+        names = set(table.column_names)
+        if "sid" in names and "seq" in names:
+            for sid, seq in zip(table.column("sid").to_pylist(),
+                                table.column("seq").to_pylist()):
+                if sid is not None and seq is not None:
+                    seq_by_sid[sid].add(seq)
 
     print("rows by channel:")
     for channel, count in sorted(totals.items()):
@@ -238,18 +274,22 @@ def main():
     else:
         print("  PASS  every raw value reproduces its stored integer\n")
 
-    print("sequence continuity (per sid):")
+    summary, all_gaps = check_sequences_global(seq_by_sid)
+    total_msgs = sum(s["messages"] for s in summary.values())
+    print(f"sequence continuity: {len(summary)} sid(s), {total_msgs:,} sequenced messages")
+    print("  (seq is per-sid and spans every channel on that subscription,")
+    print("   so continuity is checked across all files together)")
     if all_gaps:
         ok = False
-        total_missing = sum(g[4] for g in all_gaps)
-        print(f"WARN  {len(all_gaps)} gap(s), {total_missing} message(s) missing")
+        total_missing = sum(g[3] for g in all_gaps)
+        pct = 100.0 * total_missing / max(total_msgs + total_missing, 1)
+        print(f"WARN  {len(all_gaps)} gap(s), {total_missing} message(s) missing ({pct:.2f}%)")
         print("      Live gap detection is not wired into the daemon, so these")
-        print("      were never repaired at runtime. Books rebuilt across a gap")
-        print("      will be wrong until the next snapshot.")
-        for path, sid, a, b, n in all_gaps[:8]:
-            print(f"        sid={sid} {a} -> {b} ({n} missing) in {os.path.basename(path)}")
+        print("      were never repaired at runtime.")
+        for sid, a, b, n in sorted(all_gaps, key=lambda g: -g[3])[:8]:
+            print(f"        sid={sid} {a} -> {b} ({n} missing)")
     else:
-        print("  PASS  no gaps within any sid\n")
+        print("  PASS  no gaps in any sid\n")
 
     print("=" * 60)
     print("RESULT:", "PASS" if ok else "PROBLEMS FOUND — see above")

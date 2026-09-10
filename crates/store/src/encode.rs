@@ -189,6 +189,7 @@ pub fn encode(
         Channel::EventFeeUpdate => encode_fee_update(session_id, records),
         Channel::PriceRanges => encode_price_ranges(session_id, records),
         Channel::Unparsed => encode_unparsed(session_id, records),
+        Channel::Control => encode_control(session_id, records),
     }?;
     Ok(Some(batch))
 }
@@ -662,12 +663,15 @@ fn encode_unparsed(session_id: &str, records: &[StoreRecord]) -> Result<RecordBa
     let (mut parse_error, mut message_type) = (StringBuilder::new(), StringBuilder::new());
 
     for record in records {
+        // sid and seq are carried even here: an unparsable message still
+        // occupies a position in its subscription's sequence stream, and
+        // omitting it would look like loss.
         common.push(
             record.received_at,
             None,
             session_id,
-            None,
-            None,
+            envelope_sid(record),
+            envelope_seq(record),
             &record.raw,
         );
         parse_error.append_option(record.parsed.as_ref().and_then(|v| field(v, "parse_error")));
@@ -712,4 +716,51 @@ pub fn expected_rows(channel: Channel, records: &[StoreRecord]) -> usize {
             .sum(),
         _ => records.len(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Control frames
+// ---------------------------------------------------------------------------
+
+fn encode_control(session_id: &str, records: &[StoreRecord]) -> Result<RecordBatch, EncodeError> {
+    let mut common = CommonColumns::new();
+    let (mut message_type, mut channel_name) = (StringBuilder::new(), StringBuilder::new());
+    let mut error_code = Int32Builder::new();
+    let mut error_message = StringBuilder::new();
+
+    for record in records {
+        let envelope = record.parsed.clone().unwrap_or(serde_json::Value::Null);
+        let msg = body(record);
+        // `unsubscribed` carries seq at the envelope level; `subscribed`
+        // carries sid inside msg. Take whichever is present.
+        let sid =
+            envelope_sid(record).or_else(|| msg.get("sid").and_then(serde_json::Value::as_u64));
+        common.push(
+            record.received_at,
+            None,
+            session_id,
+            sid,
+            envelope_seq(record),
+            &record.raw,
+        );
+        message_type.append_option(field(&envelope, "type"));
+        channel_name.append_option(field(&msg, "channel"));
+        error_code.append_option(
+            msg.get("code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok()),
+        );
+        error_message.append_option(field(&msg, "msg"));
+    }
+
+    finish(
+        Channel::Control,
+        common,
+        vec![
+            Arc::new(message_type.finish()),
+            Arc::new(channel_name.finish()),
+            Arc::new(error_code.finish()),
+            Arc::new(error_message.finish()),
+        ],
+    )
 }
