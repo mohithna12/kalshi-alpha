@@ -220,6 +220,47 @@ writing data produced by something that should not be trusted.
 Errors are different: they bubble as `anyhow` values with context and the daemon
 logs and retries. A panic is a bug.
 
+## A config key nothing read
+
+The first production session connected at `2026-09-10T01:21:44Z`, captured
+1h48m of live NFL market data cleanly, then went silent at `03:12:22Z` and stayed
+silent for 5.9 days — reporting `messages_per_sec: 0.0` and, damningly,
+`reconnects: 0` the whole time. The reconnect loop was never broken. It never
+ran.
+
+`next_message` awaited `socket.next()` with no bound, so a server that stops
+sending — including ping frames — leaves that future pending forever. The
+`select!` in `run_connection` had exactly two branches, shutdown and read, and
+neither can fire on a socket that is open but dead.
+
+The bound was supposed to exist. `read_idle_timeout_secs = 35` had been sitting
+in `config/default.toml` since the first commit. Nothing parsed it:
+`WebsocketConfig` had no such field, and the `config` crate discards unclaimed
+keys without complaint. A second struct, `WsConfig` in `ws.rs`, *did* declare
+`read_idle_timeout` — and had zero construction sites anywhere in the
+workspace. Three plausible homes for one setting, and the value reached none of
+them.
+
+Two fixes, because the bug had two halves:
+
+- `WebsocketConfig` now claims the key, the read is wrapped in
+  `tokio::time::timeout`, and an elapsed timer returns `WsError::IdleTimeout`
+  so the existing reconnect loop rebuilds the connection *and* its
+  subscriptions. Books re-baseline from fresh snapshots rather than resuming
+  against sequence state that is by then hours stale. A separate
+  `idle_timeouts` counter keeps stalls distinguishable from ordinary drops.
+- `WsConfig` is deleted. A duplicate home for a setting is how the live one
+  goes stale unnoticed.
+
+`validate_config` rejects a timeout below 15s at startup. This knob fails in
+both directions — too large and a dead socket goes unnoticed, too small and
+every gap between the server's ~10s pings tears down a healthy connection and
+resubscribes 200 markets — and a reconnect storm is the worse failure.
+
+The regression test asserts that the shipped `default.toml` actually *delivers*
+the value, not that the key appears in it. Nothing about the original bug was
+visible in the file; it was only visible in what deserialization kept.
+
 ## The delta specification is red on purpose
 
 `OrderBook::apply_delta` is `todo!()`. The behaviour it must have is written as

@@ -109,6 +109,12 @@ pub enum WsError {
     },
     #[error("socket closed: {reason}")]
     Closed { reason: String },
+    #[error(
+        "no server traffic for {secs}s; the server pings every ~10s, so \
+         silence this long means the connection is dead even though the \
+         socket is still open"
+    )]
+    IdleTimeout { secs: u64 },
     #[error("transport error")]
     Transport(#[source] tokio_tungstenite::tungstenite::Error),
     #[error("serializing a command")]
@@ -548,25 +554,12 @@ impl Backoff {
 // Config
 // ===========================================================================
 
-#[derive(Clone, Debug)]
-pub struct WsConfig {
-    pub url: String,
-    /// No default. See [`PricingConvention`].
-    pub pricing_convention: PricingConvention,
-    pub channels: Vec<String>,
-    /// Markets per orderbook subscription. 1 bounds a gap to a single market.
-    pub orderbook_shard_size: usize,
-    /// Pace between subscribe commands. A per-subscription command rate limit
-    /// exists (error 27) but is not published numerically, so outbound commands
-    /// are paced rather than fired as fast as the socket accepts them.
-    pub subscribe_pace: Duration,
-    /// No server traffic for this long means the connection is dead. The server
-    /// pings every ~10s, so this should be comfortably above that.
-    pub read_idle_timeout: Duration,
-    pub reconnect_initial: Duration,
-    pub reconnect_max: Duration,
-    pub reconnect_jitter: f64,
-}
+// There is deliberately no `WsConfig` here. One used to exist, carrying
+// `read_idle_timeout` among other keys, and nothing ever constructed it --
+// so `read_idle_timeout_secs` sat in default.toml looking wired while
+// `next_message` awaited a dead socket for 5.9 days with `reconnects: 0`.
+// The daemon's `WebsocketConfig` in bin/capture.rs is the single owner of
+// these knobs; a second home for them is how they go stale unnoticed.
 
 // ===========================================================================
 // Connection

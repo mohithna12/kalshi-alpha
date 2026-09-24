@@ -171,6 +171,10 @@ struct WebsocketConfig {
     pricing_convention: String,
     orderbook_shard_size: usize,
     subscribe_pace_ms: u64,
+    /// No server traffic for this long means the connection is dead even
+    /// though the socket is still open. The server pings every ~10s, so this
+    /// must stay comfortably above that or a quiet market forces reconnects.
+    read_idle_timeout_secs: u64,
     reconnect_initial_ms: u64,
     reconnect_max_ms: u64,
     reconnect_jitter: f64,
@@ -217,6 +221,26 @@ fn load_config(path: &std::path::Path) -> Result<AppConfig> {
         .with_context(|| format!("loading configuration from {}", path.display()))?
         .try_deserialize()
         .context("configuration file does not match the expected shape")
+        .and_then(|config: AppConfig| validate_config(config))
+}
+
+/// Reject values that would turn a safety net into a reconnect storm.
+///
+/// `read_idle_timeout_secs` is the one knob here that fails *loudly in the
+/// wrong direction*: too large and a dead socket goes unnoticed, too small and
+/// every quiet stretch between server pings tears down a healthy connection
+/// and resubscribes 200 markets. The server pings every ~10s.
+fn validate_config(config: AppConfig) -> Result<AppConfig> {
+    const MIN_IDLE_TIMEOUT_SECS: u64 = 15;
+    let idle = config.websocket.read_idle_timeout_secs;
+    if idle < MIN_IDLE_TIMEOUT_SECS {
+        anyhow::bail!(
+            "websocket.read_idle_timeout_secs is {idle}, which is below the \
+             {MIN_IDLE_TIMEOUT_SECS}s floor. The server pings every ~10s, so a \
+             smaller value would tear down healthy connections between pings."
+        );
+    }
+    Ok(config)
 }
 
 // ===========================================================================
@@ -228,6 +252,7 @@ struct Metrics {
     messages: AtomicU64,
     bytes: AtomicU64,
     reconnects: AtomicU64,
+    idle_timeouts: AtomicU64,
     lifecycle_events: AtomicU64,
     unparsed: AtomicU64,
     off_grid_prices: AtomicU64,
@@ -742,10 +767,26 @@ async fn run_connection(
         "subscriptions established"
     );
 
+    // A silent socket is indistinguishable from a quiet market at the read
+    // call: `next_message` simply never resolves. Without this bound the
+    // connection loop below never gets to run, which is exactly how the
+    // 2026-09-10 session sat idle for 5.9 days reporting `reconnects: 0`.
+    let idle_timeout = Duration::from_secs(config.websocket.read_idle_timeout_secs);
+
     loop {
         tokio::select! {
             () = shutdown.notified() => return Ok(Reason::Shutdown),
-            message = connection.next_message() => {
+            read = tokio::time::timeout(idle_timeout, connection.next_message()) => {
+                // Returning an error hands control to the reconnect loop,
+                // which rebuilds the connection *and* its subscriptions --
+                // books re-baseline from fresh snapshots rather than
+                // resuming against sequence state that may be long stale.
+                let Ok(message) = read else {
+                    metrics.idle_timeouts.fetch_add(1, Ordering::Relaxed);
+                    return Err(WsError::IdleTimeout {
+                        secs: idle_timeout.as_secs(),
+                    });
+                };
                 let message = message?;
                 let Some(received) = message else { continue };
 
@@ -1043,6 +1084,7 @@ async fn metrics_task(
                     messages_total = messages,
                     bytes_total = metrics.bytes.load(Ordering::Relaxed),
                     reconnects = metrics.reconnects.load(Ordering::Relaxed),
+                    idle_timeouts = metrics.idle_timeouts.load(Ordering::Relaxed),
                     lifecycle_events = metrics.lifecycle_events.load(Ordering::Relaxed),
                     unparsed = metrics.unparsed.load(Ordering::Relaxed),
                     off_grid_prices = metrics.off_grid_prices.load(Ordering::Relaxed),
@@ -1099,3 +1141,44 @@ fn expand_tilde(path: &str) -> PathBuf {
 }
 
 use futures_util::FutureExt as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> AppConfig {
+        load_config(std::path::Path::new("config/default.toml"))
+            .expect("the shipped default.toml must load")
+    }
+
+    /// The regression guard for the 2026-09-10 stall.
+    ///
+    /// `read_idle_timeout_secs` lived in default.toml for weeks while no
+    /// struct field claimed it, so `config` silently discarded it and the read
+    /// loop had no bound. Deserialization is the only thing standing between
+    /// "the key is in the file" and "the key reaches the read loop", and it
+    /// fails silently in the direction that matters: an unclaimed key is
+    /// ignored, not rejected. This asserts the value actually arrives.
+    #[test]
+    fn shipped_config_supplies_the_read_idle_timeout() {
+        assert_eq!(default_config().websocket.read_idle_timeout_secs, 35);
+    }
+
+    #[test]
+    fn read_idle_timeout_below_the_ping_interval_is_rejected() {
+        let mut config = default_config();
+        config.websocket.read_idle_timeout_secs = 5;
+        let err = validate_config(config).expect_err("5s is below the floor");
+        assert!(
+            err.to_string().contains("read_idle_timeout_secs"),
+            "the error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn a_timeout_at_the_floor_is_accepted() {
+        let mut config = default_config();
+        config.websocket.read_idle_timeout_secs = 15;
+        assert!(validate_config(config).is_ok());
+    }
+}
