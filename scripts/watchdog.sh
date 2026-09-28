@@ -29,13 +29,36 @@
 set -uo pipefail
 
 ROOT="${KALSHI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-HEARTBEAT="${KALSHI_HEARTBEAT:-$ROOT/data/.heartbeat}"
-PIDFILE="${KALSHI_PIDFILE:-$ROOT/capture.pid}"
+ENV_FILE="${KALSHI_ENV_FILE:-$ROOT/.env}"
+
+# Sourced before anything else is derived, because it names the environment and
+# the environment names the heartbeat file. Values already in the environment
+# win: an explicit KALSHI_* on the command line beats the file, which beats the
+# defaults below. (A plain `set -a; . .env` would invert that.)
+load_env_file() {
+    [ -f "$1" ] || return 0
+    local line key
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        key="${line%%=*}"
+        case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
+        [ -n "${!key:-}" ] && continue
+        eval "export $line"
+    done < "$1"
+}
+load_env_file "$ENV_FILE"
+
+KALSHI_CAPTURE_ENV="${KALSHI_CAPTURE_ENV:-prod}"
+
+# Per environment. A demo run and a prod run share a data directory, so one
+# shared heartbeat file means starting demo silences the prod watchdog while
+# the prod outage carries on.
+HEARTBEAT="${KALSHI_HEARTBEAT:-$ROOT/data/.heartbeat.$KALSHI_CAPTURE_ENV}"
+PIDFILE="${KALSHI_PIDFILE:-$ROOT/capture.$KALSHI_CAPTURE_ENV.pid}"
 CAPTURE_LOG="${KALSHI_CAPTURE_LOG:-$ROOT/capture.log}"
 LOG="${KALSHI_WATCHDOG_LOG:-$ROOT/data/.watchdog.log}"
-STATE="${KALSHI_WATCHDOG_STATE:-$ROOT/data/.watchdog.state}"
-LOCK="${KALSHI_WATCHDOG_LOCK:-$ROOT/data/.watchdog.lock}"
-ENV_FILE="${KALSHI_ENV_FILE:-$ROOT/.env}"
+STATE="${KALSHI_WATCHDOG_STATE:-$ROOT/data/.watchdog.state.$KALSHI_CAPTURE_ENV}"
+LOCK="${KALSHI_WATCHDOG_LOCK:-$ROOT/data/.watchdog.lock.$KALSHI_CAPTURE_ENV}"
 BINARY="${KALSHI_BINARY:-$ROOT/target/release/capture}"
 
 # The daemon writes every 30s; 180s means six consecutive misses.
@@ -47,7 +70,6 @@ MIN_FREE_MB="${KALSHI_MIN_FREE_MB:-2048}"
 # More than this many restarts inside RESET_WINDOW_SECONDS is a crash loop.
 MAX_RESTARTS="${KALSHI_MAX_RESTARTS:-5}"
 RESET_WINDOW_SECONDS="${KALSHI_RESET_WINDOW_SECONDS:-3600}"
-KALSHI_CAPTURE_ENV="${KALSHI_CAPTURE_ENV:-prod}"
 
 note() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$LOG"; }
 
@@ -124,13 +146,6 @@ fi
 if [ ! -x "$BINARY" ]; then
     alert "refusing to restart: no executable at ${BINARY} — run 'just build-release'"
     exit 1
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$ENV_FILE"
-    set +a
 fi
 
 if [ -z "${KALSHI_AUTH__KEY_ID:-}" ]; then

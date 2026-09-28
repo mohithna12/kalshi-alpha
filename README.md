@@ -283,6 +283,55 @@ none. A healthy check clears the restart streak, so an unrelated failure next
 month starts counting from zero. Restarting can be turned off entirely with
 `KALSHI_WATCHDOG_RESTART=0`.
 
+## Provenance is checked at launch, not at build
+
+Every Parquet partition records the `git_sha` that wrote it, and production
+capture refuses to run from a tree that cannot be resolved back to code. That
+guard used to read a constant stamped by `build.rs` through `env!`, which meant
+it described the tree as it was *when the binary was compiled*.
+
+Cargo re-ran `build.rs` only when `.git/HEAD` changed. `.git/HEAD` changes on
+checkout. It does **not** change on commit: a commit moves
+`refs/heads/<branch>` and leaves `HEAD` holding the same `ref:` line. Nothing
+observed working-tree edits at all. So the stamp went stale routinely.
+
+It failed safe on 2026-09-28: a binary built mid-edit kept claiming `-dirty`
+after the tree was clean, the daemon refused to start, and a cron restart tick
+was lost. The other direction is the one that matters — build clean at X, edit,
+rebuild without touching `.git/HEAD`, and the binary still claims X with no
+`-dirty`. Every file written would record provenance pointing at code that
+never produced it. A guard that cannot see what it guards against is worse than
+no guard, because it is trusted.
+
+`session::provenance()` now asks git at startup and returns one of four states:
+
+- `Clean` — tree clean, and `GIT_SHA` matches `HEAD`. The only state production
+  capture proceeds from.
+- `Dirty` — uncommitted changes. Refused.
+- `Stale` — tree clean, but the binary came from a different commit. Refused,
+  and this is the state that was previously invisible: nothing looks wrong.
+- `Unknown` — no git, or not a repository. A warning, not a refusal: shipping a
+  binary somewhere without git is legitimate. The session record then carries
+  an uncorroborated claim, and the log says so.
+
+`build.rs` still stamps the SHA — that part is genuinely build-time — and now
+watches the resolved ref and `packed-refs` as well as `HEAD`, so a commit on
+the current branch actually invalidates it. But the *clean/dirty* question is
+no longer answered there, because no file-watch list catches arbitrary
+working-tree edits, and an approximately-correct guard is the problem.
+
+## One heartbeat per environment
+
+`data/.heartbeat` was one file for both environments, and demo and prod share a
+data directory. So a demo run marked the heartbeat fresh and the prod watchdog
+reported healthy — while the prod outage carried on.
+
+Found by walking into it: an 8-second demo smoke test on 2026-09-28 cost the
+prod capture a restart tick. The daemon now writes `data/.heartbeat.<env>` and
+logs the resolved path at startup; the watchdog's pid file, restart streak and
+lock are likewise per environment, so two watchdogs cannot fight over one
+another's state.
+
 ## A config key nothing read
 
 The first production session connected at `2026-09-10T01:21:44Z`, captured

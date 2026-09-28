@@ -25,15 +25,92 @@ pub const PARSER_VERSION: u32 = 1;
 /// The git commit that produced this binary, from `build.rs`.
 pub const GIT_SHA: &str = env!("KALSHI_GIT_SHA");
 
-/// Whether the working tree had uncommitted changes at build time.
+/// What the working tree looks like **now**, at launch.
 ///
 /// A production soak must run from a clean tree: the session record ties every
-/// captured row to a `git_sha`, and a `-dirty` SHA cannot be resolved back to
-/// reproducible code. Months later, "which code produced this file" would have
-/// no answer.
+/// captured row to a `git_sha`, and a SHA that does not resolve back to
+/// reproducible code leaves "which code produced this file" unanswerable
+/// months later.
+///
+/// # Why this is not a build-time constant
+///
+/// It used to be. `build.rs` stamped `KALSHI_GIT_DIRTY` and the daemon read it
+/// through `env!`, which meant the guard described the tree as it was when the
+/// binary was compiled -- and cargo only re-ran `build.rs` when
+/// `.git/HEAD` changed. `.git/HEAD` changes on *checkout*. It does not change
+/// on *commit*: a commit moves `refs/heads/<branch>` and leaves `HEAD` holding
+/// the same `ref:` line. Nothing observed working-tree edits at all.
+///
+/// So the stamp went stale routinely, in both directions. The harmless
+/// direction showed up on 2026-09-28, when a binary built mid-edit kept
+/// claiming `-dirty` after the tree was clean and the daemon refused to start.
+/// The other direction is the one that matters: build clean at X, edit, rebuild
+/// without touching `.git/HEAD`, and the binary still claims X with no
+/// `-dirty` -- so Parquet files record provenance pointing at code that never
+/// wrote them. A guard that cannot see the thing it guards against is worse
+/// than no guard, because it is trusted.
+///
+/// Asking git at startup costs one subprocess per run and describes the tree
+/// the operator actually launched from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provenance {
+    /// Tree is clean and the binary was built from this exact commit.
+    Clean,
+    /// Tree has uncommitted changes.
+    Dirty,
+    /// Tree is clean, but the binary came from a different commit -- a stale
+    /// build. `GIT_SHA` would misreport which code is running.
+    Stale { built_from: String, head: String },
+    /// git could not be consulted: not a repository, or no git on PATH. The
+    /// embedded SHA is all there is, and it cannot be corroborated.
+    Unknown { reason: String },
+}
+
+impl Provenance {
+    /// Whether this state is safe to capture production data under.
+    #[must_use]
+    pub fn is_reproducible(&self) -> bool {
+        matches!(self, Provenance::Clean)
+    }
+}
+
+fn git(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| format!("running git {}: {e}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    String::from_utf8(out.stdout)
+        .map(|s| s.trim().to_owned())
+        .map_err(|e| format!("git {} returned non-UTF-8: {e}", args.join(" ")))
+}
+
+/// Inspect the working tree at launch. See [`Provenance`].
 #[must_use]
-pub fn build_tree_was_dirty() -> bool {
-    env!("KALSHI_GIT_DIRTY") == "true"
+pub fn provenance() -> Provenance {
+    let head = match git(&["rev-parse", "HEAD"]) {
+        Ok(head) => head,
+        Err(reason) => return Provenance::Unknown { reason },
+    };
+    match git(&["status", "--porcelain"]) {
+        Ok(status) if !status.is_empty() => return Provenance::Dirty,
+        Ok(_) => {}
+        Err(reason) => return Provenance::Unknown { reason },
+    }
+    // The tree is clean, so GIT_SHA carries no `-dirty` suffix to strip.
+    if GIT_SHA != head {
+        return Provenance::Stale {
+            built_from: GIT_SHA.to_owned(),
+            head,
+        };
+    }
+    Provenance::Clean
 }
 
 /// The date the Kalshi API documentation was read and this code written

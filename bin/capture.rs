@@ -30,7 +30,7 @@ use kalshi_ingest::rest::{RestClient, RestConfig};
 use kalshi_ingest::wire::ServerMessage;
 use kalshi_ingest::ws::{Backoff, Connection, PricingConvention, SubscriptionRegistry, WsError};
 use kalshi_store::schema::Channel;
-use kalshi_store::session::{Environment, SessionMetadata};
+use kalshi_store::session::{Environment, Provenance, SessionMetadata};
 use kalshi_store::sink::{Offered, StoreRecord};
 use kalshi_store::writer::{ParquetStore, WriterConfig};
 use kalshi_store::GridHistory;
@@ -453,13 +453,35 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
                      deliberate."
                 );
             }
-            // The soak must be reproducible. A dirty tree means the captured
-            // data records a git_sha that resolves to nothing.
-            if kalshi_store::session::build_tree_was_dirty() && !cli.allow_dirty_tree {
-                bail!(
+            // The soak must be reproducible. Checked against the tree as it
+            // is right now, not as it was when this binary was compiled --
+            // see `session::Provenance`.
+            match kalshi_store::session::provenance() {
+                Provenance::Clean => {}
+                Provenance::Unknown { reason } => {
+                    // Not fatal: a binary shipped somewhere without git is a
+                    // legitimate deployment. But GIT_SHA is then an
+                    // uncorroborated claim, and the session record says so.
+                    warn!(
+                        %reason,
+                        git_sha = kalshi_store::session::GIT_SHA,
+                        "could not verify the working tree against git; the \
+                         recorded git_sha is the build-time claim and nothing \
+                         has confirmed it"
+                    );
+                }
+                state if cli.allow_dirty_tree => {
+                    warn!(
+                        ?state,
+                        "capturing production data from an unreproducible tree \
+                         because --allow-dirty-tree was passed. The session \
+                         record will not resolve back to code."
+                    );
+                }
+                Provenance::Dirty => bail!(
                     "refusing to capture production data from a dirty working tree.\n\
                      \n\
-                     Session metadata records git_sha as {}, which cannot be \
+                     Session metadata would record git_sha as {}, which cannot be \
                      resolved back to reproducible code -- in January there would \
                      be no answer to \"which code produced this file\".\n\
                      \n\
@@ -467,7 +489,17 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
                      --allow-dirty-tree only for a deliberate one-off, never for \
                      a soak.",
                     kalshi_store::session::GIT_SHA
-                );
+                ),
+                Provenance::Stale { built_from, head } => bail!(
+                    "refusing to capture production data from a stale build.\n\
+                     \n\
+                     This binary was built from {built_from}, but HEAD is now \
+                     {head}. The tree is clean, so nothing would look wrong: \
+                     every Parquet file would record {built_from} while running \
+                     code that commit does not describe.\n\
+                     \n\
+                     Run `just build-release` and retry."
+                ),
             }
             Environment::Prod
         }
@@ -614,8 +646,20 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
         Arc::clone(&shutdown),
     ));
 
+    // Per environment, not one shared file. A demo run and a prod run share a
+    // data directory, so a single heartbeat means starting demo silences the
+    // prod watchdog for as long as it is up -- the outage stays real and the
+    // alerting goes quiet, which is the worst combination. Observed on
+    // 2026-09-28, when an 8-second demo smoke test cost the prod capture a
+    // restart tick.
+    let heartbeat_path = heartbeat_path_for(&config.observability.heartbeat_path, environment);
+    info!(
+        path = %heartbeat_path.display(),
+        environment = environment.as_str(),
+        "heartbeat file"
+    );
     let heartbeat = tokio::spawn(heartbeat_task(
-        PathBuf::from(&config.observability.heartbeat_path),
+        heartbeat_path,
         Duration::from_secs(config.observability.heartbeat_interval_secs),
         Arc::clone(&shutdown),
     ));
@@ -1261,6 +1305,18 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+/// Suffix the configured heartbeat path with the environment.
+///
+/// `data/.heartbeat` becomes `data/.heartbeat.prod` or `data/.heartbeat.demo`.
+/// Appending rather than inserting keeps the mapping obvious in a directory
+/// listing and keeps the configured value the visible stem.
+fn heartbeat_path_for(configured: &str, environment: Environment) -> PathBuf {
+    let mut path = expand_tilde(configured).into_os_string();
+    path.push(".");
+    path.push(environment.as_str());
+    PathBuf::from(path)
+}
+
 fn expand_tilde(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => match std::env::var_os("HOME") {
@@ -1351,6 +1407,32 @@ mod tests {
             markets_needing_subscription(&books, &["KXNFLGAME-26SEP28PHICHI-PHI".to_owned()])
                 .is_empty()
         );
+    }
+
+    /// The bug this prevents: a demo run touching the file the prod watchdog
+    /// reads, so a real prod outage looks healthy for as long as demo is up.
+    #[test]
+    fn each_environment_gets_its_own_heartbeat_file() {
+        let demo = heartbeat_path_for("data/.heartbeat", Environment::Demo);
+        let prod = heartbeat_path_for("data/.heartbeat", Environment::Prod);
+        assert_eq!(demo, PathBuf::from("data/.heartbeat.demo"));
+        assert_eq!(prod, PathBuf::from("data/.heartbeat.prod"));
+        assert_ne!(demo, prod);
+    }
+
+    #[test]
+    fn only_a_clean_tree_counts_as_reproducible() {
+        assert!(Provenance::Clean.is_reproducible());
+        assert!(!Provenance::Dirty.is_reproducible());
+        assert!(!Provenance::Stale {
+            built_from: "aaa".to_owned(),
+            head: "bbb".to_owned(),
+        }
+        .is_reproducible());
+        assert!(!Provenance::Unknown {
+            reason: "no git".to_owned(),
+        }
+        .is_reproducible());
     }
 
     #[test]

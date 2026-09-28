@@ -255,6 +255,11 @@ warn_on_off_grid_prices = true
 # every occurrence, only the log lines are throttled.
 off_grid_warn_per_market_per_min = 5
 # Touched every 30s so an external watchdog can detect a stall.
+#
+# The environment is appended: this becomes data/.heartbeat.prod or
+# data/.heartbeat.demo. Demo and prod share a data directory, and a single
+# shared file would let a demo run silence the prod watchdog while the prod
+# outage carried on.
 heartbeat_path = "data/.heartbeat"
 heartbeat_interval_secs = 30
 log_format = "json"
