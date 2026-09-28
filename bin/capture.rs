@@ -34,10 +34,10 @@ use kalshi_store::session::{Environment, SessionMetadata};
 use kalshi_store::sink::{Offered, StoreRecord};
 use kalshi_store::writer::{ParquetStore, WriterConfig};
 use kalshi_store::GridHistory;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -258,6 +258,7 @@ struct Metrics {
     off_grid_prices: AtomicU64,
     desync_invalidations: AtomicU64,
     reconciliation_misses: AtomicU64,
+    late_subscriptions: AtomicU64,
     snapshot_restarts: AtomicU64,
 }
 
@@ -619,6 +620,20 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
         Arc::clone(&shutdown),
     ));
 
+    // The authoritative market set, shared with reconciliation.
+    //
+    // A reconnect resubscribes from this set rather than from the startup
+    // list, so a market discovered at 02:00 is still covered by the connection
+    // that replaces the one established at 01:00. Without it, every reconnect
+    // would silently roll coverage back to whatever discovery saw at boot.
+    let live_markets: Arc<Mutex<BTreeSet<String>>> =
+        Arc::new(Mutex::new(markets.iter().cloned().collect()));
+
+    // Reconciliation cannot subscribe directly -- it has no connection, and
+    // the connection is rebuilt underneath it on every reconnect. It hands
+    // markets over instead, and whichever connection is live picks them up.
+    let (late_tx, mut late_rx) = tokio::sync::mpsc::channel::<Vec<String>>(64);
+
     // Discovery is a loop, not an init step. NFL markets are created through
     // the week and during games, and `market_lifecycle_v2` carries no sequence
     // number -- so a dropped creation message leaves no trace. REST
@@ -630,6 +645,8 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
         Duration::from_secs(config.discovery.reconcile_interval_secs),
         markets.clone(),
         Arc::clone(&metrics),
+        Arc::clone(&live_markets),
+        late_tx,
         Arc::clone(&shutdown),
     ));
 
@@ -660,15 +677,20 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
         if shutdown.notified().now_or_never().is_some() {
             break;
         }
+        let subscribe_set: Vec<String> = {
+            let guard = live_markets.lock().unwrap_or_else(|p| p.into_inner());
+            guard.iter().cloned().collect()
+        };
         match run_connection(
             &endpoint.ws,
             &credentials,
             &config,
             convention,
-            &markets,
+            &subscribe_set,
             shard_size,
             &handle,
             &metrics,
+            &mut late_rx,
             Arc::clone(&shutdown),
         )
         .await
@@ -701,6 +723,71 @@ enum Reason {
     Shutdown,
 }
 
+/// The subset of `markets` that has no book open yet, deduplicated.
+///
+/// Split out from `subscribe_markets` because this is the part that can be
+/// tested without a socket, and it is the part that matters: a market
+/// subscribed twice gets a second sid carrying its own sequence stream, and
+/// two streams mutating one book desync it in a way that looks exactly like a
+/// gap. Reconciliation can legitimately offer the same market twice -- once
+/// racing a reconnect that already picked it up from the shared set -- so this
+/// is a live path, not a defensive check.
+fn markets_needing_subscription(
+    books: &HashMap<String, AnyBook>,
+    markets: &[String],
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    markets
+        .iter()
+        .filter(|m| !books.contains_key(*m))
+        .filter(|m| seen.insert((*m).clone()))
+        .cloned()
+        .collect()
+}
+
+/// Subscribe a set of markets and open a book for each.
+///
+/// Shared by startup and by late arrivals from reconciliation, so both paths
+/// pace identically and open books the same way. Markets already in `books`
+/// are skipped: a second subscription for the same market would be a second
+/// sid carrying its own sequence stream, and two streams mutating one book is
+/// a desync that looks exactly like a gap.
+async fn subscribe_markets(
+    connection: &mut Connection,
+    books: &mut HashMap<String, AnyBook>,
+    markets: &[String],
+    orderbook_channels: &[String],
+    convention: PricingConvention,
+    shard_size: usize,
+    pace: Duration,
+) -> Result<usize, WsError> {
+    let fresh = markets_needing_subscription(books, markets);
+
+    for shard in fresh.chunks(shard_size.max(1)) {
+        connection
+            .subscribe(orderbook_channels, shard, convention)
+            .await?;
+        for market in shard {
+            books.insert(
+                market.clone(),
+                AnyBook::new(
+                    kalshi_common::Ticker::parse(market).unwrap_or_else(|_| {
+                        // Discovery already validated these; a malformed
+                        // ticker here would be a bug, not bad input.
+                        kalshi_common::Ticker::parse("INVALID").unwrap_or_else(|_| unreachable!())
+                    }),
+                    convention.use_yes_price(),
+                ),
+            );
+        }
+        // A per-subscription command rate limit exists (error 27) but is not
+        // published numerically, so commands are paced rather than fired as
+        // fast as the socket accepts them.
+        tokio::time::sleep(pace).await;
+    }
+    Ok(fresh.len())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_connection(
     url: &str,
@@ -711,6 +798,7 @@ async fn run_connection(
     shard_size: usize,
     handle: &kalshi_store::sink::StoreHandle,
     metrics: &Arc<Metrics>,
+    late_arrivals: &mut tokio::sync::mpsc::Receiver<Vec<String>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<Reason, WsError> {
     let mut connection = Connection::connect(url, credentials).await?;
@@ -737,28 +825,16 @@ async fn run_connection(
         .cloned()
         .collect();
 
-    for shard in markets.chunks(shard_size.max(1)) {
-        connection
-            .subscribe(&orderbook_channels, shard, convention)
-            .await?;
-        for market in shard {
-            books.insert(
-                market.clone(),
-                AnyBook::new(
-                    kalshi_common::Ticker::parse(market).unwrap_or_else(|_| {
-                        // Discovery already validated these; a malformed
-                        // ticker here would be a bug, not bad input.
-                        kalshi_common::Ticker::parse("INVALID").unwrap_or_else(|_| unreachable!())
-                    }),
-                    convention.use_yes_price(),
-                ),
-            );
-        }
-        // A per-subscription command rate limit exists (error 27) but is not
-        // published numerically, so commands are paced rather than fired as
-        // fast as the socket accepts them.
-        tokio::time::sleep(pace).await;
-    }
+    subscribe_markets(
+        &mut connection,
+        &mut books,
+        markets,
+        &orderbook_channels,
+        convention,
+        shard_size,
+        pace,
+    )
+    .await?;
 
     info!(
         subscriptions = registry.len(),
@@ -776,6 +852,35 @@ async fn run_connection(
     loop {
         tokio::select! {
             () = shutdown.notified() => return Ok(Reason::Shutdown),
+            Some(arrivals) = late_arrivals.recv() => {
+                // Markets reconciliation found after this connection was
+                // established. Subscribing now costs one command; waiting for
+                // the next reconnect costs every tick until then, and that
+                // data is unrecoverable.
+                match subscribe_markets(
+                    &mut connection,
+                    &mut books,
+                    &arrivals,
+                    &orderbook_channels,
+                    convention,
+                    shard_size,
+                    pace,
+                ).await {
+                    Ok(0) => {}
+                    Ok(subscribed) => {
+                        metrics.late_subscriptions.fetch_add(
+                            u64::try_from(subscribed).unwrap_or(0),
+                            Ordering::Relaxed,
+                        );
+                        info!(
+                            subscribed,
+                            markets = ?arrivals,
+                            "subscribed markets that reconciliation found after startup"
+                        );
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
             read = tokio::time::timeout(idle_timeout, connection.next_message()) => {
                 // Returning an error hands control to the reconnect loop,
                 // which rebuilds the connection *and* its subscriptions --
@@ -963,6 +1068,7 @@ async fn writer_task(
 /// interval is permanently gone — the same failure class as a dropped record.
 /// So each one is logged individually at WARN and counted as a primary health
 /// metric, never treated as routine.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_task(
     rest: RestClient,
     series: Vec<String>,
@@ -970,6 +1076,8 @@ async fn reconcile_task(
     interval: Duration,
     initial: Vec<String>,
     metrics: Arc<Metrics>,
+    live_markets: Arc<Mutex<BTreeSet<String>>>,
+    late_tx: tokio::sync::mpsc::Sender<Vec<String>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) {
     let mut registry = kalshi_ingest::rest::MarketRegistry::new();
@@ -1016,6 +1124,28 @@ async fn reconcile_task(
                          unsubscribed and their data for that interval is \
                          unrecoverable. This is a bug in the live path, not noise."
                     );
+
+                    // The interval that just elapsed is lost either way. What
+                    // is still recoverable is every interval after it, so the
+                    // markets join the authoritative set (covering the next
+                    // reconnect) and are handed to the live connection
+                    // (covering right now).
+                    let newly: Vec<String> = {
+                        let mut guard =
+                            live_markets.lock().unwrap_or_else(|p| p.into_inner());
+                        result
+                            .newly_known
+                            .iter()
+                            .map(ToString::to_string)
+                            .filter(|t| guard.insert(t.clone()))
+                            .collect()
+                    };
+                    if !newly.is_empty() && late_tx.send(newly).await.is_err() {
+                        // The connection loop is gone, which only happens on
+                        // shutdown. The set is still updated, so a restart
+                        // covers these.
+                        warn!("no live connection to hand reconciled markets to");
+                    }
                 }
             }
         }
@@ -1090,6 +1220,7 @@ async fn metrics_task(
                     off_grid_prices = metrics.off_grid_prices.load(Ordering::Relaxed),
                     desync_invalidations = metrics.desync_invalidations.load(Ordering::Relaxed),
                     reconciliation_misses = metrics.reconciliation_misses.load(Ordering::Relaxed),
+                    late_subscriptions = metrics.late_subscriptions.load(Ordering::Relaxed),
                     snapshot_restarts = metrics.snapshot_restarts.load(Ordering::Relaxed),
                     queue_depth = handle.queue_depth(),
                     queue_capacity = handle.capacity(),
@@ -1172,6 +1303,53 @@ mod tests {
         assert!(
             err.to_string().contains("read_idle_timeout_secs"),
             "the error must name the key: {err}"
+        );
+    }
+
+    fn books_for(markets: &[&str]) -> HashMap<String, AnyBook> {
+        markets
+            .iter()
+            .map(|m| {
+                let ticker = kalshi_common::Ticker::parse(m).expect("valid test ticker");
+                ((*m).to_owned(), AnyBook::new(ticker, false))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_market_with_a_book_open_is_not_subscribed_again() {
+        let books = books_for(&["KXNFLGAME-26SEP28PHICHI-PHI"]);
+        let fresh = markets_needing_subscription(
+            &books,
+            &[
+                "KXNFLGAME-26SEP28PHICHI-PHI".to_owned(),
+                "KXNFLGAME-26SEP28PHICHI-CHI".to_owned(),
+            ],
+        );
+        assert_eq!(fresh, vec!["KXNFLGAME-26SEP28PHICHI-CHI".to_owned()]);
+    }
+
+    /// Reconciliation can offer the same market twice in one batch. Two sids
+    /// on one book desync it in a way indistinguishable from a sequence gap,
+    /// so the duplicate has to die here rather than be noticed later.
+    #[test]
+    fn a_market_repeated_within_one_batch_is_subscribed_once() {
+        let fresh = markets_needing_subscription(
+            &HashMap::new(),
+            &[
+                "KXNFLGAME-26SEP28PHICHI-PHI".to_owned(),
+                "KXNFLGAME-26SEP28PHICHI-PHI".to_owned(),
+            ],
+        );
+        assert_eq!(fresh.len(), 1);
+    }
+
+    #[test]
+    fn nothing_new_yields_no_subscriptions() {
+        let books = books_for(&["KXNFLGAME-26SEP28PHICHI-PHI"]);
+        assert!(
+            markets_needing_subscription(&books, &["KXNFLGAME-26SEP28PHICHI-PHI".to_owned()])
+                .is_empty()
         );
     }
 

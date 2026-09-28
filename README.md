@@ -165,7 +165,9 @@ definition site as well.
     `market_lifecycle_v2` grows it, and a 15-minute re-crawl reconciles. A
     market found only by reconciliation was unsubscribed, and that interval is
     unrecoverable — so it WARNs per market and is counted, never treated as
-    routine.
+    routine. It is also *subscribed*: the elapsed interval is gone either way,
+    but every interval after it is still recoverable. See "Reconciliation
+    subscribes, not just complains".
 17. **`observed_at` and `effective_at` are different columns.** A discovery read
     says what the grid *is*; a lifecycle event says when it *changed*.
     Collapsing them makes "what grid was in force at 14:32 on Nov 8"
@@ -219,6 +221,42 @@ writing data produced by something that should not be trusted.
 
 Errors are different: they bubble as `anyhow` values with context and the daemon
 logs and retries. A panic is a bug.
+
+## Reconciliation subscribes, not just complains
+
+The 2026-09-10 session logged 32 `reconciliation_misses` — markets like
+`KXNFLGAME-26SEP28PHICHI-PHI` that neither startup discovery nor the lifecycle
+feed reported. Each one WARNed, loudly and correctly, and then nothing
+happened. The market stayed unsubscribed for the rest of the session.
+
+Detection without remedy is a worse failure than it looks: the alert fires
+every 300s forever, which trains you to ignore it, while the data keeps not
+being captured.
+
+Reconciliation cannot subscribe directly. It has no connection, and the
+connection is rebuilt underneath it on every reconnect. So coverage is now held
+in two places, and a market has to reach both:
+
+- `live_markets`, an `Arc<Mutex<BTreeSet<String>>>` shared with the connection
+  loop, seeded by startup discovery and grown by reconciliation. **Reconnects
+  resubscribe from this set, not from the startup list.** Without it a
+  reconnect at 03:00 would silently roll coverage back to whatever discovery
+  saw at boot — which would have made this fix useless in exactly the sessions
+  that need it.
+- An `mpsc` channel to whichever connection is live, so a market found at 02:00
+  is subscribed at 02:00 rather than at the next reconnect.
+
+Both paths converge on `subscribe_markets`, which skips any market that already
+has a book open. That is a live path, not a defensive check: a reconciliation
+batch can race a reconnect that already picked the same market up from the
+shared set. A market subscribed twice gets a second sid carrying its own
+sequence stream, and two streams mutating one book desync it in a way that
+looks exactly like a gap — so the duplicate dies at the boundary, where it is
+cheap, rather than in the book, where it is indistinguishable from the fault
+the recovery ladder exists to handle.
+
+`late_subscriptions` counts what this recovers. `reconciliation_misses` still
+counts the underlying bug in the live path, because it is still a bug.
 
 ## A config key nothing read
 
