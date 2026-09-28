@@ -289,6 +289,39 @@ none. A healthy check clears the restart streak, so an unrelated failure next
 month starts counting from zero. Restarting can be turned off entirely with
 `KALSHI_WATCHDOG_RESTART=0`.
 
+## The pricing convention, settled
+
+Verified 2026-09-28 against `KXNFLGAME-26SEP28PHICHI-CHI` — a production market
+with deep resting NO liquidity (7.65M across 63 levels), during the live
+Sep 28 PHI@CHI game. The same market was subscribed twice on one connection,
+once with `use_yes_price: false` and once `true`, and the NO side read off both:
+
+```
+NO-side prices under no_leg : 0.0100, 0.0200, 0.0300, ... 0.6100, 0.6200, 0.6300
+NO-side prices under yes_leg: 0.9900, 0.9800, 0.9700, ... 0.3900, 0.3800, 0.3700
+```
+
+Across all 63 levels, every pair sums to exactly `1.0000`. So:
+
+- **`no_leg`** delivers the raw NO bid price. A NO bid at `p` is a YES ask at
+  `$1.00 - p`, and *this code* performs that conversion.
+- **`yes_leg`** delivers prices the exchange has already converted.
+
+Neither is more correct; they are the same book in two coordinate systems. What
+matters is that the reader knows which one, which is why the convention is
+written into the session metadata rather than assumed.
+
+`no_leg` is kept. It is what the captured data was already recorded under, the
+book type stores levels canonically on the YES side and derives the NO view
+anyway, and changing it now would relabel 2026-09-10 relative to everything
+after it for no gain.
+
+The value of having measured it: nothing in the data would have revealed the
+wrong choice. Both conventions produce complete, well-formed, plausible books —
+prices in range, sizes positive, no gaps, no parse errors. A mis-set convention
+inverts every NO-side price with no error, no gap, and nothing to detect, and
+would surface only as a strategy that backtests beautifully and loses money.
+
 ## Sharding does not do what it was designed to do
 
 `orderbook_shard_size = 1` exists to bound a gap's blast radius: `seq` is
@@ -474,9 +507,10 @@ Stage 2 soak and record the answer here.**
 
 Recovery is tested deliberately, not observed:
 
-- [ ] `just verify-pricing <MARKET>` against a **production** market with
-      resting NO liquidity — settles `use_yes_price` empirically. Record the
-      answer here and set `websocket.pricing_convention` to match.
+- [x] `just verify-pricing <MARKET>` against a **production** market with
+      resting NO liquidity — **done 2026-09-28** against
+      `KXNFLGAME-26SEP28PHICHI-CHI`. See "The pricing convention, settled".
+      `websocket.pricing_convention` stays `no_leg`.
 - [ ] `just probe-limits` on demo **before** the first 200-market subscribe —
       measures subs/connection, markets/subscription, and the command rate limit
 - [ ] `just force-gap <MARKET>` — **not yet implemented**: needs a control

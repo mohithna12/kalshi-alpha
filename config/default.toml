@@ -134,8 +134,16 @@ channels = ["orderbook_delta", "ticker", "trade", "market_lifecycle_v2"]
 # this key, and the active value is written into the Parquet session metadata
 # so January analysis knows which convention a given file is in.
 #
-# VERIFY EMPIRICALLY BEFORE THE SEASON: subscribe one live market under each
-# setting and confirm what (side, price) means in each. Do not infer it.
+# VERIFIED EMPIRICALLY 2026-09-28 against KXNFLGAME-26SEP28PHICHI-CHI, a live
+# production market with deep resting NO liquidity. Subscribed twice on one
+# connection, once per setting; the NO side read off both:
+#
+#   no_leg : 0.0100, 0.0200, ... 0.6300   (raw NO bid price)
+#   yes_leg: 0.9900, 0.9800, ... 0.3700   (exchange already applied 1.00 - p)
+#
+# Every one of the 63 levels pairs to exactly 1.0000. Both are the same book in
+# different coordinates; no_leg is kept because the captured data is already
+# recorded under it and the book stores canonically on the YES side regardless.
 pricing_convention = "no_leg"
 
 # Markets per orderbook_delta subscription.
