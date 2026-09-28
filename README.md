@@ -258,6 +258,31 @@ the recovery ladder exists to handle.
 `late_subscriptions` counts what this recovers. `reconciliation_misses` still
 counts the underlying bug in the live path, because it is still a bug.
 
+## The watchdog restarts, and refuses to
+
+`scripts/watchdog.sh` alerted and stopped there. For the 5.9 days the daemon
+was wedged it fired every 5 minutes, into a notification centre nobody was
+watching, on a laptop.
+
+It now restarts — but the interesting part is the three cases where it refuses,
+because a watchdog that restarts unconditionally is a crash loop generator:
+
+1. **Low free disk** (default 2GB). `ENOSPC` is what ended the session, and a
+   daemon relaunched onto a full volume dies the same way every 5 minutes. This
+   check runs *before* anything is killed: a wedged daemon still holding
+   buffered rows is worth more than a fresh one that cannot write.
+2. **Missing binary or credentials.** Cron runs with almost no environment, so
+   the script sources `.env` (see `.env.example`) and refuses rather than
+   starting a daemon that would only 401 in a loop.
+3. **More than 5 restarts in an hour.** A crash loop needs a human; cron will
+   happily run one forever.
+
+A `mkdir` lock keeps two cron ticks from racing — a restart can outlast the
+5-minute interval, and two daemons writing one data directory is worse than
+none. A healthy check clears the restart streak, so an unrelated failure next
+month starts counting from zero. Restarting can be turned off entirely with
+`KALSHI_WATCHDOG_RESTART=0`.
+
 ## A config key nothing read
 
 The first production session connected at `2026-09-10T01:21:44Z`, captured

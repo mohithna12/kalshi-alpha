@@ -26,6 +26,10 @@ logs/
 *.log
 *.pid
 .watchdog.log
+# The watchdog's restart streak and its cron lock. Committing either would
+# hand another machine a stale crash-loop count or a lock nobody holds.
+.watchdog.state
+.watchdog.lock/
 
 # --- Editor / OS ---
 .DS_Store
