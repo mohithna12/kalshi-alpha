@@ -67,10 +67,17 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    /// Whether this state is safe to capture production data under.
+    /// Whether the recorded `git_sha` resolves to code that describes this
+    /// binary.
+    ///
+    /// True for [`Provenance::Stale`] as well as [`Provenance::Clean`]: an old
+    /// build is not an untrustworthy one. It records the commit that actually
+    /// produced it, that commit exists, and it describes the running code
+    /// exactly. Only [`Provenance::Dirty`] records a SHA that resolves to
+    /// nothing, and only [`Provenance::Unknown`] cannot be checked at all.
     #[must_use]
     pub fn is_reproducible(&self) -> bool {
-        matches!(self, Provenance::Clean)
+        matches!(self, Provenance::Clean | Provenance::Stale { .. })
     }
 }
 

@@ -490,16 +490,32 @@ async fn run_capture(cli: Cli, config: AppConfig) -> Result<()> {
                      a soak.",
                     kalshi_store::session::GIT_SHA
                 ),
-                Provenance::Stale { built_from, head } => bail!(
-                    "refusing to capture production data from a stale build.\n\
-                     \n\
-                     This binary was built from {built_from}, but HEAD is now \
-                     {head}. The tree is clean, so nothing would look wrong: \
-                     every Parquet file would record {built_from} while running \
-                     code that commit does not describe.\n\
-                     \n\
-                     Run `just build-release` and retry."
-                ),
+                Provenance::Stale { built_from, head } => {
+                    // A warning, NOT a refusal. The binary is older than HEAD,
+                    // but it is still perfectly reproducible: it records
+                    // `built_from`, that commit exists, and it describes this
+                    // code exactly. Nothing about the data is untrustworthy.
+                    //
+                    // This refused until 2026-09-28, when a documentation-only
+                    // commit moved HEAD, the daemon refused to restart, the
+                    // watchdog spent its five restarts on a fault no retry
+                    // could fix, and capture stayed down for thirteen hours
+                    // across a game. A guard that refuses to run, inside a
+                    // system whose only recovery is to run again, is a trap:
+                    // committing anything during a live capture armed it.
+                    //
+                    // Dirty still refuses, because there the SHA resolves to
+                    // nothing. That is the real, unrecoverable case.
+                    warn!(
+                        built_from = %built_from,
+                        head = %head,
+                        "this binary is older than HEAD. Data is still \
+                         reproducible -- every file records the commit that \
+                         actually produced it -- but the running code is not \
+                         what HEAD describes. Run `just build-release` to catch \
+                         up when convenient."
+                    );
+                }
             }
             Environment::Prod
         }
@@ -1425,10 +1441,12 @@ mod tests {
     }
 
     #[test]
-    fn only_a_clean_tree_counts_as_reproducible() {
+    fn a_stale_build_is_still_reproducible_but_a_dirty_one_is_not() {
         assert!(Provenance::Clean.is_reproducible());
         assert!(!Provenance::Dirty.is_reproducible());
-        assert!(!Provenance::Stale {
+        // An old build still records the commit that produced it, and that
+        // commit describes it exactly. Stale is a warning, not a refusal.
+        assert!(Provenance::Stale {
             built_from: "aaa".to_owned(),
             head: "bbb".to_owned(),
         }

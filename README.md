@@ -403,8 +403,9 @@ no guard, because it is trusted.
 - `Clean` — tree clean, and `GIT_SHA` matches `HEAD`. The only state production
   capture proceeds from.
 - `Dirty` — uncommitted changes. Refused.
-- `Stale` — tree clean, but the binary came from a different commit. Refused,
-  and this is the state that was previously invisible: nothing looks wrong.
+- `Stale` — tree clean, but the binary came from a different commit. **Warned,
+  not refused** — see below. This is the state that was previously invisible:
+  nothing looks wrong.
 - `Unknown` — no git, or not a repository. A warning, not a refusal: shipping a
   binary somewhere without git is legitimate. The session record then carries
   an uncorroborated claim, and the log says so.
@@ -414,6 +415,32 @@ watches the resolved ref and `packed-refs` as well as `HEAD`, so a commit on
 the current branch actually invalidates it. But the *clean/dirty* question is
 no longer answered there, because no file-watch list catches arbitrary
 working-tree edits, and an approximately-correct guard is the problem.
+
+### Why `Stale` warns instead of refusing
+
+It refused, for about fourteen hours.
+
+On 2026-09-28 a **documentation-only** commit moved HEAD. The running daemon was
+built from the previous commit, so the next restart hit the stale-build refusal.
+The watchdog retried, spent all five of its restarts on a fault no retry could
+fix, hit its crash-loop brake, and went quiet. Capture stayed down for thirteen
+hours, across a game. A README edit took down the capture.
+
+The error message was accurate and the watchdog behaved correctly. The design
+was still wrong: **a guard that refuses to run does not belong in a system whose
+only recovery mechanism is to run again.** Every commit during a live capture
+armed a trap that fired at the next restart.
+
+The reasoning behind the refusal does not survive scrutiny either. A stale build
+is not unreproducible. It records `built_from`, that commit exists, and it
+describes the running code exactly — which is the entire purpose of recording a
+SHA. Nothing about the captured data is untrustworthy; the only thing that is
+untrue is the assumption that HEAD describes what is running, and a warning says
+so perfectly well.
+
+`Dirty` still refuses, because there the recorded SHA resolves to nothing. That
+is the genuinely unrecoverable case, and it is the one the guard was written
+for.
 
 ## One heartbeat per environment
 
