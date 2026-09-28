@@ -858,8 +858,12 @@ async fn run_connection(
         .subscribe(&["market_lifecycle_v2".to_owned()], &[], convention)
         .await?;
 
-    // Orderbook subscriptions, sharded. One market per sid bounds a gap's
-    // blast radius to that market, since `seq` is per-sid.
+    // Orderbook subscriptions, sharded -- in intent only. `seq` is per-sid, so
+    // one market per sid would bound a gap's blast radius to that market. The
+    // exchange does not cooperate: it answers the first subscribe per channel
+    // with a new sid and merges every later one into it, so all markets share
+    // one sequence stream regardless of shard size. Kept as-is pending the
+    // design decision; see the README on sharding.
     let pace = Duration::from_millis(config.websocket.subscribe_pace_ms);
     let orderbook_channels: Vec<String> = config
         .websocket

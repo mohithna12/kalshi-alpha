@@ -148,8 +148,12 @@ pub enum WsError {
 pub struct SubscriptionState {
     sid: u64,
     channel: String,
-    /// Markets carried by this subscription. With shard size 1 this is one
-    /// market, which bounds a gap's blast radius to that market.
+    /// Markets carried by this subscription.
+    ///
+    /// Intended to be one market at shard size 1, bounding a gap's blast radius.
+    /// In practice the exchange merges every later subscribe for a channel into
+    /// the existing sid, so this holds every subscribed market on the channel.
+    /// See the README on sharding.
     markets: Vec<String>,
     last_seq: Option<u64>,
     /// False until a snapshot seeds the book, and after any detected gap.

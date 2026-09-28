@@ -154,6 +154,8 @@ probe-limits:
     KALSHI_ENV=demo cargo run --release --bin capture -- probe-limits \
         --max-subscriptions 512 --pace-ms 25
 
+# MOOT: the exchange merges markets into one sid per channel, so every shard
+# size produces identical subscriptions. Kept only to reproduce that finding.
 # A/B the sharding decision during the soak. shard-size 1 bounds a gap to one
 # market but costs one subscription each; larger shards are cheaper but widen
 # the blast radius. The 60s metrics line reports gap rate per sid so this can be

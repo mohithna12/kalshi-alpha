@@ -143,9 +143,17 @@ pricing_convention = "no_leg"
 # INVARIANT: `seq` is scoped per subscription id (sid), NOT per market. One
 # subscribe command covering N markets yields ONE sid whose seq stream is shared
 # across all N. A single gap therefore invalidates every book on that sid.
-# Sharding at 1 market per subscription bounds the blast radius of a gap to one
-# market at the cost of one subscribe command each. Raise this only if the
-# subscription count becomes a problem, and understand what you are trading.
+# Sharding at 1 market per subscription was meant to bound a gap's blast radius
+# to one market at the cost of one subscribe command each.
+#
+# IT DOES NOT WORK. Measured on 2026-09-10: the exchange answers the first
+# subscribe for a channel with `subscribed` and a new sid, and every later one
+# with `ok`, merging those markets into the SAME sid. 64 markets at shard size 1
+# produced one sid per channel, not 64. No value here produces per-market sids.
+#
+# Left at 1 pending the design decision (drop it, or repurpose it to shard
+# across connections). See "Sharding does not do what it was designed to do" in
+# the README. Changing it currently has no effect on the wire.
 orderbook_shard_size = 1
 
 # Pace outbound subscribe commands. WebSocket commands do NOT draw from the REST
@@ -234,9 +242,11 @@ quarantine_on_startup = true
 # cumulative invalidation duration, recovery method counts (resubscribe vs
 # full reconnect), lifecycle events, reconnects, and bytes written.
 #
-# The gap-rate number is the point: it decides empirically whether
-# orderbook_shard_size = 1 is buying anything, or whether 200 subscriptions are
-# being paid for a failure that happens twice a month.
+# The gap-rate number is the point. It was meant to decide whether
+# orderbook_shard_size = 1 was buying anything; the 2026-09-10 capture settled
+# that separately -- sharding buys nothing, because the exchange merges markets
+# into one sid per channel. The per-sid gap rate still matters for sizing
+# recovery, just not for the sharding decision.
 metrics_interval_secs = 60
 # Emit a per-sid breakdown, not just the aggregate. Verbose, but this is the
 # data the sharding decision rests on.

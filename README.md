@@ -108,8 +108,14 @@ definition site as well.
 
 1. **`seq` is per-`sid`, not per-market.** One `subscribe` command covering N
    markets returns one `sid`, and its sequence stream is shared by all N. A gap
-   invalidates *every* book on that subscription. Capture therefore shards
-   `orderbook_delta` to one market per subscription by default.
+   invalidates *every* book on that subscription.
+
+   Capture *attempts* to shard `orderbook_delta` to one market per subscription.
+   **This does not work, and the exchange does not allow it** — see "Sharding
+   does not do what it was designed to do". One sid per channel is what you get,
+   so a gap's blast radius is every subscribed market. Treat
+   `orderbook_shard_size` as having no effect on the wire until that section
+   says otherwise.
 2. **A gap is never interpolated.** On a detected gap the affected books are
    marked invalid and re-seeded from a fresh snapshot. The book type exposes its
    contents only through a method returning `Option`, which is `None` while
@@ -283,6 +289,62 @@ none. A healthy check clears the restart streak, so an unrelated failure next
 month starts counting from zero. Restarting can be turned off entirely with
 `KALSHI_WATCHDOG_RESTART=0`.
 
+## Sharding does not do what it was designed to do
+
+`orderbook_shard_size = 1` exists to bound a gap's blast radius: `seq` is
+per-sid, so one market per sid should mean one market invalidated per gap. The
+2026-09-10 capture shows it buys nothing. That session discovered 64 markets and
+sent 64 separate subscribe commands at shard size 1, and produced **three** sids
+— one per channel:
+
+| sid | channel | markets |
+|-----|------------------------------------|---------|
+| 1   | `market_lifecycle_v2` (global)     | 11,585  |
+| 2   | `orderbook_delta` + `orderbook_snapshot` | 64 |
+| 3   | `ticker`                           | 64      |
+| 4   | `trade`                            | 59      |
+
+The `control` partition records why. The first orderbook subscribe was answered
+with `subscribed`, creating sids 2, 3 and 4. Every later subscribe for those
+same channels was answered with `ok` instead:
+
+```json
+{"type":"subscribed","id":2,"msg":{"channel":"orderbook_delta","sid":2}}
+{"type":"ok","id":3,"sid":2,"seq":2,"msg":{"market_tickers":[...]}}
+```
+
+The exchange issues **one sid per channel per connection** and merges further
+markets into it. It does not hand out a sid per subscribe command, so no value
+of `orderbook_shard_size` produces per-market sids. A single missed message on
+sid 2 invalidates all 64 orderbooks at once.
+
+Consequences, none of them yet acted on:
+
+- `_session.json` records `orderbook_shard_size` as configured. That field
+  describes *intent*, not what the wire did. Analysis must not read it as the
+  number of markets per sequence stream.
+- The `Resubscribe` rung of the recovery ladder is far more disruptive than
+  designed: it drops every market on the sid, not one.
+- `just soak-shard 1` vs `just soak-shard 25` cannot answer anything — both
+  produce one sid per channel.
+- Genuine per-market isolation would need separate *connections*, which runs
+  straight into the undocumented max-subscriptions-per-connection limit that
+  `just probe-limits` exists to measure.
+
+**The design decision is open.** Keep the knob and the subscribe loop as they
+are, drop them as dead weight, or repurpose the setting to shard across
+connections rather than subscriptions. Nothing here should be changed before
+`probe-limits` has run, because the answer depends on how many connections the
+account can hold.
+
+Two things this also confirmed, both load-bearing and both right:
+
+- Control frames consume sequence numbers. The `ok` frames above carry `seq` 2
+  and 3 on sid 2. Discarding them would punch holes in the seq stream
+  indistinguishable from real loss, which is exactly why they are stored.
+- Storing them made this diagnosable after the fact, from data alone, with no
+  new instrumentation.
+
 ## Provenance is checked at launch, not at build
 
 Every Parquet partition records the `git_sha` that wrote it, and production
@@ -423,8 +485,10 @@ Recovery is tested deliberately, not observed:
       `crates/ingest/tests/book.rs`, but the live path is unexercised.
 - [ ] 60s network kill, clean recovery, no manual restart
 - [ ] ≥12 lifecycle transitions handled
-- [ ] `just soak-shard 1` vs `just soak-shard 25` — compare gap rate per sid to
-      decide whether shard-size-1 is worth 200 subscriptions
+- [x] ~~`just soak-shard 1` vs `just soak-shard 25` — compare gap rate per sid~~
+      **Moot.** The exchange returns one sid per channel and merges markets into
+      it, so both shard sizes produce identical subscriptions. See "Sharding does
+      not do what it was designed to do".
 - [ ] Parquet round-trip: every `*_raw` re-parses to its stored integer
 - [ ] **Record whether `get_snapshot` continues or restarts the sequence** —
       grep the logs for `snapshot sequence did not advance`; the answer belongs
