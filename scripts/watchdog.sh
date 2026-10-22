@@ -195,6 +195,29 @@ KALSHI_ENV="$KALSHI_CAPTURE_ENV" nohup "$BINARY" "${args[@]}" >> "$CAPTURE_LOG" 
 new_pid=$!
 echo "$new_pid" > "$PIDFILE"
 
+# Hold the machine awake for exactly as long as the daemon lives.
+#
+# Machine sleep was the single largest cause of lost capture: 128 sessions in
+# the 25 days to 2026-10-22, ~5 restarts a day, 23.4h missing. A suspension
+# freezes the daemon AND cron together, so nothing inside the system can detect
+# or recover it -- the 180s heartbeat check cannot fire when cron is frozen too.
+#
+# `caffeinate -w <pid>` holds its assertions until that pid exits, which ties
+# the assertion's lifetime to the daemon's without wrapping it. Wrapping
+# (`caffeinate ... "$BINARY"`) would be simpler and wrong: $! would then be
+# caffeinate's pid, so the PIDFILE would name the wrong process and the
+# SIGTERM above would signal caffeinate rather than the daemon -- orphaning it
+# and letting the next restart run a second daemon against the same data
+# directory, which is precisely what the lock exists to prevent.
+#
+# -i idle sleep, -m disk sleep, -s system sleep. Deliberately not -d: the
+# display should still be allowed to turn off. Note -s applies only on AC
+# power; on battery the machine will still sleep and gaps will still appear.
+if [ "${KALSHI_CAFFEINATE:-1}" = "1" ] && command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -ims -w "$new_pid" >/dev/null 2>&1 &
+    note "holding sleep off for pid ${new_pid} (caffeinate -ims -w)"
+fi
+
 restarts=$(( restarts + 1 ))
 echo "$restarts $now" > "$STATE"
 

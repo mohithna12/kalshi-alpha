@@ -206,7 +206,16 @@ def main():
     unreadable = []
     open_now = []
     # seq is per-sid and spans every channel of that subscription, so
-    # continuity is accumulated globally and checked once at the end.
+    # continuity is accumulated across files and checked once at the end.
+    #
+    # Keyed by (session_id, sid), NOT by sid alone. The exchange hands out sids
+    # per connection and starts low, so every session in a multi-session
+    # dataset has its own sid=2 carrying an unrelated stream from 1. Keying on
+    # sid alone unions all of them into one set, where a real hole in one
+    # session is silently filled by a different session's identical seq -- and
+    # the check reports a clean dataset no matter how much was lost. That was
+    # the behaviour until 2026-10-22: it was sound while there was one session
+    # and quietly wrong once there were 128.
     seq_by_sid = defaultdict(set)
 
     for path in files:
@@ -246,10 +255,14 @@ def main():
 
         names = set(table.column_names)
         if "sid" in names and "seq" in names:
-            for sid, seq in zip(table.column("sid").to_pylist(),
-                                table.column("seq").to_pylist()):
+            sess_col = (table.column("session_id").to_pylist()
+                        if "session_id" in names
+                        else [None] * table.num_rows)
+            for session_id, sid, seq in zip(sess_col,
+                                            table.column("sid").to_pylist(),
+                                            table.column("seq").to_pylist()):
                 if sid is not None and seq is not None:
-                    seq_by_sid[sid].add(seq)
+                    seq_by_sid[(session_id, sid)].add(seq)
 
     print("rows by channel:")
     for channel, count in sorted(totals.items()):
@@ -291,9 +304,10 @@ def main():
 
     summary, all_gaps = check_sequences_global(seq_by_sid)
     total_msgs = sum(s["messages"] for s in summary.values())
-    print(f"sequence continuity: {len(summary)} sid(s), {total_msgs:,} sequenced messages")
-    print("  (seq is per-sid and spans every channel on that subscription,")
-    print("   so continuity is checked across all files together)")
+    print(f"sequence continuity: {len(summary)} (session, sid) stream(s), "
+          f"{total_msgs:,} sequenced messages")
+    print("  (seq is per-sid and spans every channel on that subscription;")
+    print("   each session's sids are its own, so streams are keyed by both)")
     if all_gaps:
         ok = False
         total_missing = sum(g[3] for g in all_gaps)
@@ -302,7 +316,11 @@ def main():
         print("      Live gap detection is not wired into the daemon, so these")
         print("      were never repaired at runtime.")
         for sid, a, b, n in sorted(all_gaps, key=lambda g: -g[3])[:8]:
-            print(f"        sid={sid} {a} -> {b} ({n} missing)")
+            session_id, sid_num = sid if isinstance(sid, tuple) else (None, sid)
+            where = f"sid={sid_num}"
+            if session_id:
+                where = f"session={session_id} {where}"
+            print(f"        {where} {a} -> {b} ({n} missing)")
     else:
         print("  PASS  no gaps in any sid\n")
 
