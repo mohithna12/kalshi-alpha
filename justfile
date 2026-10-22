@@ -239,6 +239,19 @@ preflight SECONDS="90":
 # Offline verification of captured data: re-parses every raw column with an
 # independent parser and reports per-sid sequence gaps.
 # Verify captured data offline: re-parse raw columns, report per-sid gaps.
+# Restarts (crash, watchdog kill, machine sleep) each open a new session, and
+# the wall-clock between sessions is data nobody captured. The Parquet files do
+# not say so -- rows just stop and resume -- so coverage is reconstructed from
+# the session records.
+# Report capture coverage and the gaps between sessions.
+coverage DAY="":
+    #!/usr/bin/env bash
+    if [ -n "{{DAY}}" ]; then
+        python3 scripts/coverage.py data --since {{DAY}}
+    else
+        python3 scripts/coverage.py data
+    fi
+
 readback DAY="":
     #!/usr/bin/env bash
     if [ -n "{{DAY}}" ]; then

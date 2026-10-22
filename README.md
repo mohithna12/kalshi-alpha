@@ -228,6 +228,49 @@ writing data produced by something that should not be trusted.
 Errors are different: they bubble as `anyhow` values with context and the daemon
 logs and retries. A panic is a bug.
 
+## What three weeks of unattended capture actually captured
+
+Measured 2026-10-22 over the span 2026-09-28 to 2026-10-22 (575 hours) with
+`just coverage`:
+
+```
+sessions: 128      coverage: 95.81% of span (550.9h of 575.0h)
+gaps >120s: 39     total missing: 23.4h
+coverage DURING NFL game windows: 98.69% (53.5h of 54.2h)
+```
+
+**128 sessions in 25 days** -- roughly five restarts a day. The daemon did not
+crash five times a day; the laptop slept, and each suspension froze the process
+and `cron` together until the watchdog woke to a stale heartbeat and replaced
+it. 2,796 watchdog alerts over the period.
+
+The headline is better than the restart count suggests. Only **43 minutes of
+game-time data was lost across eleven game windows**, because the gaps cluster
+in quiet overnight hours when markets are near-idle. The worst four:
+
+| window    | date       | missing  |
+|-----------|------------|----------|
+| TNF       | 2026-10-02 | 15.1 min |
+| Sun games | 2026-10-11 | 13.6 min |
+| Sun games | 2026-10-04 |  7.5 min |
+| TNF       | 2026-10-16 |  6.5 min |
+
+The single largest gap in the whole span -- **13 hours**, 2026-09-28 09:24Z to
+22:25Z -- was self-inflicted and is documented under "Why `Stale` warns instead
+of refusing". It fell on a Monday daytime, outside any game window, which is
+the only reason it cost nothing.
+
+### Why this needs its own tool
+
+Nothing in the Parquet files says a gap belongs anywhere. Rows simply stop and
+then resume, and a reader cannot distinguish "the market was quiet" from "the
+capture was dead" -- the two look identical in the data. Only the session
+records carry the boundary, so `scripts/coverage.py` reconstructs the union of
+session intervals and reports the complement.
+
+Any analysis that treats absence of rows as absence of activity will be wrong
+by 23.4 hours over this span. Check coverage before trusting a quiet stretch.
+
 ## Reconciliation subscribes, not just complains
 
 The 2026-09-10 session logged 32 `reconciliation_misses` — markets like
