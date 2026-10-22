@@ -260,6 +260,50 @@ The single largest gap in the whole span -- **13 hours**, 2026-09-28 09:24Z to
 of refusing". It fell on a Monday daytime, outside any game window, which is
 the only reason it cost nothing.
 
+### Integrity over the same span
+
+`just readback` over the full 1.8GB:
+
+```
+round-trip: 53,602,328 raw values re-parsed independently -> PASS
+sequence continuity: 379 (session, sid) streams, 14,924,253 sequenced messages
+                     6 gaps, 12 messages missing (0.00008%)
+```
+
+The round-trip result is the strong one: every `*_raw` string, re-parsed by an
+independently written parser, reproduces its stored integer. 53.6M values, no
+disagreements.
+
+The continuity number only became trustworthy on 2026-10-22. The check had
+keyed per-sid streams by **sid alone**, and the exchange hands out sids per
+connection starting low -- so all 128 sessions had their own `sid=2` carrying
+an unrelated stream from 1. Unioning them into one set let a real hole in one
+session be filled by a different session's identical seq. It reported *3
+streams, 2.4M messages, 1 gap*; keyed correctly by `(session_id, sid)` the same
+data is *379 streams, 14.9M messages, 6 gaps*. It had been undercounting
+messages six-fold and hiding five of six gaps -- sound while there was one
+session, quietly wrong once there were 128.
+
+**An unexplained signature.** All six gaps are identical in shape: the sequence
+advances by exactly 3, leaving exactly 2 missing.
+
+```
+session=20261008T203243Z sid=2  1103858 -> 1103861
+session=20261011T094058Z sid=2   831660 ->  831663
+session=20261011T094058Z sid=2   961206 ->  961209
+session=20261011T094058Z sid=2  1257823 -> 1257826
+session=20261012T144137Z sid=2  1727511 -> 1727514
+session=20261016T003454Z sid=2   511856 ->  511859
+```
+
+Six for six is not what dropped packets look like -- random loss would vary.
+The likelier explanation is a message type that consumes a sequence number and
+is not persisted, in which case these are not lost data at all and the
+"missing" count is an artifact of what we choose to store. Control frames were
+already found to consume seq, which is why they are stored; this may be a
+second such case. **Not yet investigated.** Until it is, treat 12 as an upper
+bound on loss, not a measurement of it.
+
 ### Why this needs its own tool
 
 Nothing in the Parquet files says a gap belongs anywhere. Rows simply stop and
