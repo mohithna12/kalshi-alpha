@@ -308,6 +308,95 @@ fn snapshot_preserves_the_wire_ordering_via_level_index() {
     }
 }
 
+/// A cleared book, as sent when a market is determined. The exchange's exact
+/// shape for this was never captured -- it was the message being dropped -- so
+/// both plausible encodings are tested: empty arrays, and arrays omitted.
+const EMPTY_SNAPSHOT_ARRAYS: &str = r#"{"type":"orderbook_snapshot","sid":2,"seq":1103859,
+  "msg":{"market_ticker":"KXNFLGAME-26OCT08TBDAL-TB",
+         "market_id":"173f76dc-1ef0-46ff-9ee5-edcc839d447c",
+         "yes_dollars_fp":[],"no_dollars_fp":[]}}"#;
+
+const EMPTY_SNAPSHOT_OMITTED: &str = r#"{"type":"orderbook_snapshot","sid":2,"seq":1103860,
+  "msg":{"market_ticker":"KXNFLGAME-26OCT08TBDAL-DAL",
+         "market_id":"7e0949d5-510d-453d-a0e2-ec4a015de73a"}}"#;
+
+#[test]
+fn an_empty_snapshot_writes_one_row_so_its_seq_survives() {
+    // Six gaps in three weeks of production capture, every one exactly two
+    // messages wide, every one at the instant a game's two markets were
+    // determined. These were the messages: a level-less snapshot fanned out
+    // to zero rows and took its seq with it.
+    for (raw, seq, ticker) in [
+        (
+            EMPTY_SNAPSHOT_ARRAYS,
+            1_103_859,
+            "KXNFLGAME-26OCT08TBDAL-TB",
+        ),
+        (
+            EMPTY_SNAPSHOT_OMITTED,
+            1_103_860,
+            "KXNFLGAME-26OCT08TBDAL-DAL",
+        ),
+    ] {
+        let (batch, _) = round_trip(
+            Channel::OrderbookSnapshot,
+            &[record(Channel::OrderbookSnapshot, raw)],
+        );
+        assert_eq!(batch.num_rows(), 1, "an empty book is still a snapshot");
+        assert_eq!(opt_int(&batch, "sid", 0), Some(2));
+        assert_eq!(opt_int(&batch, "seq", 0), Some(seq), "the seq is the point");
+        assert_eq!(strings(&batch, "market_ticker").value(0), ticker);
+        for column in ["side", "price_raw", "size_raw"] {
+            assert_eq!(
+                opt_str(&batch, column, 0),
+                None,
+                "{column} must be null on a level-less row, not a fabricated level"
+            );
+        }
+        assert_eq!(opt_int(&batch, "price_micros", 0), None);
+        assert_eq!(opt_int(&batch, "size_fp_units", 0), None);
+        assert!(batch
+            .column_by_name("level_index")
+            .expect("level_index")
+            .is_null(0));
+    }
+}
+
+#[test]
+fn a_snapshot_with_one_empty_side_writes_only_its_levels() {
+    // The placeholder row is for a book with no levels at all. One empty side
+    // is an ordinary book, and its seq already travels on the other side's rows.
+    const ONE_SIDED: &str = r#"{"type":"orderbook_snapshot","sid":2,"seq":7,
+      "msg":{"market_ticker":"FED-23DEC-T3.00",
+             "yes_dollars_fp":[["0.0800","300.00"]],"no_dollars_fp":[]}}"#;
+    let (batch, _) = round_trip(
+        Channel::OrderbookSnapshot,
+        &[record(Channel::OrderbookSnapshot, ONE_SIDED)],
+    );
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(opt_str(&batch, "side", 0).as_deref(), Some("yes"));
+    assert_eq!(opt_str(&batch, "price_raw", 0).as_deref(), Some("0.0800"));
+}
+
+#[test]
+fn empty_and_populated_snapshots_in_one_batch_lose_nothing() {
+    // round_trip asserts rows_lost() == 0, so this also checks that the
+    // writer's expected-row count agrees with the encoder about empty books.
+    let records = [
+        record(Channel::OrderbookSnapshot, SNAPSHOT),
+        record(Channel::OrderbookSnapshot, EMPTY_SNAPSHOT_ARRAYS),
+        record(Channel::OrderbookSnapshot, EMPTY_SNAPSHOT_OMITTED),
+    ];
+    let (batch, _) = round_trip(Channel::OrderbookSnapshot, &records);
+    assert_eq!(batch.num_rows(), 4 + 1 + 1);
+
+    let mut seqs: Vec<i64> = (0..batch.num_rows())
+        .filter_map(|row| opt_int(&batch, "seq", row))
+        .collect();
+    seqs.dedup();
+    assert_eq!(seqs, vec![2, 1_103_859, 1_103_860]);
+}
+
 // ===========================================================================
 // Orderbook delta
 // ===========================================================================

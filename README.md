@@ -284,7 +284,7 @@ data is *379 streams, 14.9M messages, 6 gaps*. It had been undercounting
 messages six-fold and hiding five of six gaps -- sound while there was one
 session, quietly wrong once there were 128.
 
-**An unexplained signature.** All six gaps are identical in shape: the sequence
+**The six gaps were not loss.** All six are identical in shape: the sequence
 advances by exactly 3, leaving exactly 2 missing.
 
 ```
@@ -297,12 +297,36 @@ session=20261016T003454Z sid=2   511856 ->  511859
 ```
 
 Six for six is not what dropped packets look like -- random loss would vary.
-The likelier explanation is a message type that consumes a sequence number and
-is not persisted, in which case these are not lost data at all and the
-"missing" count is an artifact of what we choose to store. Control frames were
-already found to consume seq, which is why they are stored; this may be a
-second such case. **Not yet investigated.** Until it is, treat 12 as an upper
-bound on loss, not a measurement of it.
+Investigated 2026-10-28: every gap falls on the instant one game's two
+`KXNFLGAME` markets were `determined` on the lifecycle channel. Six games,
+twelve determinations of subscribed markets, twelve missing seqs, one to one.
+The first, from the data:
+
+```
+03:19:37.804  orderbook_delta  sid=2 seq=1103858  TBDAL-TB
+03:19:37.909  market_lifecycle determined         TBDAL-TB   (result yes)
+03:19:37.909  market_lifecycle determined         TBDAL-DAL  (result no)
+03:19:38.038  ticker           TBDAL-TB  yes_bid_size 0, yes_ask_size 0
+03:19:38.359  orderbook_delta  sid=2 seq=1103861  CHIGB-CHI
+```
+
+The two missing messages were the cleared books: an `orderbook_snapshot` with
+no levels, one per settled market. The encoder fans a snapshot out to one row
+per level, so a level-less snapshot became **zero rows**, and its `seq` went
+with it. Of everything stored, only a snapshot can produce zero rows. Every
+other channel writes one row per message, and an unrecognised shape goes to
+`unparsed`, which has never had a file. That leaves no other candidate.
+
+The writer's own loss check could not see it. `expected_rows` counted levels
+too, so an empty snapshot was expected to produce zero rows and did. That makes
+the "no rows lost" reconciliation meaningless for exactly this case.
+
+Fixed: an empty snapshot now writes one row with every level column null, and
+`expected_rows` counts it as one. The snapshot schema's `side`, `price_raw`,
+`size_raw` and `level_index` became nullable. Files from before and after the
+fix read together without trouble (checked with `pyarrow.dataset`). Data
+captured before the fix keeps its holes, and they mean "this book was cleared
+here". **Measured real loss over the span: zero.**
 
 ### Why this needs its own tool
 

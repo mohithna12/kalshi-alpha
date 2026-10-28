@@ -203,17 +203,20 @@ fn schema_with(extra: Vec<Field>) -> Arc<Schema> {
 
 /// One row per price level, flattened out of the snapshot's arrays.
 fn orderbook_snapshot_schema() -> Arc<Schema> {
+    // The level columns are nullable because a snapshot of an empty book has
+    // no levels and is still written, as one row with all of them null. See
+    // `encode_orderbook_snapshot` for why that row must exist.
     schema_with(vec![
         Field::new("market_ticker", DataType::Utf8, false),
         Field::new("market_id", DataType::Utf8, true),
-        Field::new("side", DataType::Utf8, false),
-        Field::new("price_raw", DataType::Utf8, false),
+        Field::new("side", DataType::Utf8, true),
+        Field::new("price_raw", DataType::Utf8, true),
         Field::new("price_micros", DataType::Int64, true),
-        Field::new("size_raw", DataType::Utf8, false),
+        Field::new("size_raw", DataType::Utf8, true),
         Field::new("size_fp_units", DataType::Int64, true),
         // Which level this was within its side, so the snapshot's ordering is
         // reconstructible without re-sorting.
-        Field::new("level_index", DataType::Int32, false),
+        Field::new("level_index", DataType::Int32, true),
     ])
 }
 

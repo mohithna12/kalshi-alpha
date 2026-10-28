@@ -257,6 +257,33 @@ fn encode_orderbook_snapshot(
         let sid = envelope_sid(record);
         let seq = envelope_seq(record);
 
+        // A snapshot of an empty book still produces one row, with every
+        // level column null.
+        //
+        // Fanning out one row per level gives such a snapshot zero rows, and
+        // with them goes its `seq`. The exchange sends one when a market is
+        // determined and its book is cleared, so every settled market left a
+        // hole in the sid's sequence stream that readback reported as two lost
+        // messages per game -- indistinguishable from real loss. Losing the
+        // fact "this book is now empty" is the same mistake as losing the seq.
+        if level_count(&msg) == 0 {
+            common.push(
+                record.received_at,
+                int_field(&msg, "ts_ms"),
+                session_id,
+                sid,
+                seq,
+                &record.raw,
+            );
+            market.append_value(ticker);
+            market_id.append_option(id);
+            side.append_null();
+            price.push_price(None);
+            size.push_qty(None);
+            level_index.append_null();
+            continue;
+        }
+
         // Both arrays hold BIDS. A no_dollars_fp entry is a bid to buy NO,
         // which is a YES ask at the complementary price. The side is recorded
         // as sent; the reciprocal conversion belongs to the book, not to
@@ -703,19 +730,27 @@ fn encode_unparsed(session_id: &str, records: &[StoreRecord]) -> Result<RecordBa
 #[must_use]
 pub fn expected_rows(channel: Channel, records: &[StoreRecord]) -> usize {
     match channel {
+        // An empty snapshot still writes one row, so it counts as one. Counting
+        // it as zero is how its disappearance balanced the books: zero
+        // expected, zero written, nothing reported lost.
         Channel::OrderbookSnapshot => records
             .iter()
-            .map(|record| {
-                let msg = body(record);
-                ["yes_dollars_fp", "no_dollars_fp"]
-                    .iter()
-                    .filter_map(|key| msg.get(*key).and_then(serde_json::Value::as_array))
-                    .map(Vec::len)
-                    .sum::<usize>()
-            })
+            .map(|record| level_count(&body(record)).max(1))
             .sum(),
         _ => records.len(),
     }
+}
+
+/// Price levels in a snapshot body, across both sides.
+///
+/// Counts the entries the encoder will turn into rows, so an entry that is not
+/// a `[price, size]` array is not counted.
+fn level_count(msg: &serde_json::Value) -> usize {
+    ["yes_dollars_fp", "no_dollars_fp"]
+        .iter()
+        .filter_map(|key| msg.get(*key).and_then(serde_json::Value::as_array))
+        .map(|levels| levels.iter().filter(|level| level.is_array()).count())
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
