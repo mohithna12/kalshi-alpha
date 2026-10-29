@@ -14,10 +14,20 @@ unreadable, so market prices here lag the wire by up to that long. Health
 numbers come from the heartbeat and the metrics line instead, which are live.
 The page says which is which rather than implying everything is real-time.
 
-# It must not starve capture
+# It must not starve capture, even in public
 
-It shares a small VM with the daemon. DuckDB is held to one thread and a
-memory cap, results are cached, and the systemd unit adds a CPU quota on top.
+It shares a small VM with the daemon and may be served without a password.
+So the work any amount of traffic can cause is bounded by construction, not
+only by a rate limit:
+
+- every endpoint is cached, and its arguments are restricted to a finite set
+  (captured markets, three chart ranges, one coverage window), so the number
+  of distinct queries per cache period is fixed whatever the request rate;
+- a cache miss computes once while concurrent requests for the same key wait;
+- DuckDB runs one query at a time, on one thread, under a memory cap;
+- each client IP is limited to RATE_LIMIT requests a minute.
+
+The systemd unit adds a CPU quota and memory ceiling on top.
 
 Usage:
     python3 dashboard/server.py                       # serves 127.0.0.1:8080
@@ -32,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -49,6 +60,9 @@ PORT = int(os.environ.get("KALSHI_DASHBOARD_PORT", "8080"))
 LOG_SOURCE = os.environ.get("KALSHI_LOG_SOURCE", "journal")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 STALE_SECONDS = 180
+CHART_HOURS = (6, 24, 168)
+COVERAGE_DAYS = 7
+RATE_LIMIT = int(os.environ.get("KALSHI_DASHBOARD_RATE_LIMIT", "120"))
 PX = 1_000_000
 QTY = 100
 
@@ -114,10 +128,22 @@ def files(channel, since, until=None):
     return sorted(out)
 
 
+_query_slot = threading.Lock()
+
+
 def query(sql, paths, params=()):
-    """Run `sql` with `{files}` bound to a read_parquet over `paths`."""
+    """Run `sql` with `{files}` bound to a read_parquet over `paths`.
+
+    One query at a time: concurrent page loads queue here rather than each
+    taking a core from the capture daemon.
+    """
     if not paths:
         return []
+    with _query_slot:
+        return _run(sql, paths, params)
+
+
+def _run(sql, paths, params):
     con = duckdb.connect()
     try:
         con.execute("SET threads = 1")
@@ -130,22 +156,27 @@ def query(sql, paths, params=()):
 
 
 def cached(seconds):
-    """Memoize a function's result per argument tuple for `seconds`."""
+    """Memoize a function's result per argument tuple for `seconds`.
+
+    A miss computes once: other requests for the same key wait for it rather
+    than all running the same query at the moment the entry expires.
+    """
 
     def wrap(fn):
         store = {}
+        key_locks = defaultdict(threading.Lock)
         lock = threading.Lock()
 
         def inner(*args):
-            now = time.monotonic()
             with lock:
+                key_lock = key_locks[args]
+            with key_lock:
                 hit = store.get(args)
-                if hit and now - hit[0] < seconds:
+                if hit and time.monotonic() - hit[0] < seconds:
                     return hit[1]
-            value = fn(*args)
-            with lock:
-                store[args] = (now, value)
-            return value
+                value = fn(*args)
+                store[args] = (time.monotonic(), value)
+                return value
 
         return inner
 
@@ -412,25 +443,50 @@ def history(ticker, hours):
 # ---------------------------------------------------------------------------
 
 
+_hits = defaultdict(deque)
+_hits_lock = threading.Lock()
+
+
+def allow(ip):
+    """Sliding one-minute window of at most RATE_LIMIT requests per IP."""
+    now = time.monotonic()
+    with _hits_lock:
+        window = _hits[ip]
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) >= RATE_LIMIT:
+            return False
+        window.append(now)
+        if len(_hits) > 10_000:  # forget idle visitors
+            for key in [k for k, v in _hits.items() if not v or now - v[-1] > 60]:
+                del _hits[key]
+        return True
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "kalshi-dashboard"
 
     def do_GET(self):
         url = urlparse(self.path)
         args = parse_qs(url.query)
+        if not allow(self.client()):
+            return self.fail(429, "too many requests; try again in a minute")
         try:
             if url.path == "/api/status":
                 return self.json(status())
             if url.path == "/api/coverage":
-                days = min(max(int(args.get("days", ["7"])[0]), 1), 90)
-                return self.json(coverage_report(days))
+                return self.json(coverage_report(COVERAGE_DAYS))
             if url.path == "/api/markets":
                 return self.json(markets())
             if url.path == "/api/history":
                 ticker = args.get("market", [""])[0].upper()
-                if not re.fullmatch(r"[A-Z0-9.\-]{1,128}", ticker):
-                    return self.fail(400, "bad market ticker")
-                hours = min(max(int(args.get("hours", ["24"])[0]), 1), 24 * 14)
+                # Only markets actually captured: an arbitrary ticker would be
+                # an uncached query per distinct string.
+                if ticker not in {m["ticker"] for m in markets()["markets"]}:
+                    return self.fail(404, "not a captured market")
+                hours = int(args.get("hours", ["24"])[0])
+                if hours not in CHART_HOURS:
+                    return self.fail(400, f"hours must be one of {CHART_HOURS}")
                 return self.json(history(ticker, hours))
             if url.path in ("/", "/index.html"):
                 return self.static("index.html", "text/html; charset=utf-8")
@@ -440,6 +496,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # one bad query must not take the page down
             print(f"error serving {url.path}: {exc!r}", file=sys.stderr)
             return self.fail(500, "query failed")
+
+    def client(self):
+        """The visitor's IP. Behind Caddy that is X-Forwarded-For, which is
+        only trusted from the local proxy."""
+        peer = self.client_address[0]
+        forwarded = self.headers.get("X-Forwarded-For")
+        if forwarded and peer in ("127.0.0.1", "::1"):
+            return forwarded.split(",")[-1].strip()
+        return peer
 
     def json(self, payload):
         body = json.dumps(payload, default=str).encode()

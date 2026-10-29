@@ -712,6 +712,7 @@ DuckDB over the Parquet files, and it never contacts Kalshi or writes under
 
 ```sh
 ssh root@HOST 'bash -s' < deploy/dashboard.sh   # install/upgrade; Caddy + TLS + password
+ssh root@HOST 'KALSHI_DASHBOARD_AUTH=public bash -s' < deploy/dashboard.sh   # no password
 deploy/dashboard-password.sh HOST               # password into ~/.kalshi/, never printed
 python3 dashboard/server.py                     # locally, against ./data (KALSHI_LOG_SOURCE=capture.log)
 ```
@@ -720,6 +721,10 @@ Health numbers are live. **Market prices lag by up to one file roll (5
 min)**, because a Parquet file has no footer, and so cannot be read, until the
 daemon closes it. The page says so next to the prices. The dashboard runs at
 `Nice=10` with a CPU and memory cap, because it shares the box with capture.
+Public mode is safe for the same reason: every endpoint is cached and accepts
+only a finite set of arguments (captured markets, three chart ranges), queries
+run one at a time, and each IP gets 120 requests a minute. Traffic can slow
+the page, but it cannot create more database work than a single viewer would.
 It also writes no bytecode: an untracked `__pycache__/` in the tree would make
 production capture refuse to start.
 

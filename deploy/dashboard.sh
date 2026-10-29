@@ -3,11 +3,18 @@
 # after deploy/bootstrap.sh:
 #
 #   ssh root@HOST 'bash -s' < deploy/dashboard.sh
+#   ssh root@HOST 'KALSHI_DASHBOARD_AUTH=public bash -s' < deploy/dashboard.sh
 #
-# Serves https://<ip-with-dashes>.sslip.io behind a password. sslip.io resolves
-# that name to the IP itself, which is what lets Caddy get a real certificate
-# for a server with no domain. The password is generated once and stored
-# root-only at /etc/caddy/dashboard-password; it is never printed.
+# Serves https://<ip-with-dashes>.sslip.io. sslip.io resolves that name to the
+# IP itself, which is what lets Caddy get a real certificate for a server with
+# no domain.
+#
+# KALSHI_DASHBOARD_AUTH picks `password` (the default) or `public`. The choice
+# is remembered in /etc/caddy/dashboard-auth, so a later upgrade that does not
+# pass it keeps the page as it was instead of silently re-locking or exposing
+# it. In password mode the password is generated once, stored root-only at
+# /etc/caddy/dashboard-password, and never printed. In public mode the server
+# bounds its own work (see dashboard/server.py), since anyone can load it.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
@@ -17,6 +24,7 @@ DUCKDB_VERSION=2.0.0
 IP=$(curl -fsS4 https://ifconfig.me || hostname -I | awk '{print $1}')
 SITE="${KALSHI_DASHBOARD_SITE:-${IP//./-}.sslip.io}"
 PASSWORD_FILE=/etc/caddy/dashboard-password
+AUTH_FILE=/etc/caddy/dashboard-auth
 
 [ -f "$ROOT/dashboard/server.py" ] || {
     echo "no dashboard in $ROOT; run deploy/bootstrap.sh first" >&2
@@ -37,20 +45,31 @@ systemctl daemon-reload
 systemctl enable kalshi-dashboard.service >/dev/null
 systemctl restart kalshi-dashboard.service
 
-# --- Caddy: TLS and a password in front of it ------------------------------
+# --- Caddy: TLS, and a password unless public ------------------------------
+AUTH="${KALSHI_DASHBOARD_AUTH:-$(cat "$AUTH_FILE" 2>/dev/null || echo password)}"
+case "$AUTH" in
+    password|public) ;;
+    *) echo "KALSHI_DASHBOARD_AUTH must be 'password' or 'public', not '$AUTH'" >&2; exit 1 ;;
+esac
+mkdir -p /etc/caddy
+printf '%s\n' "$AUTH" > "$AUTH_FILE"
+
 created_password=""
-if [ ! -f "$PASSWORD_FILE" ]; then
-    created_password=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)
-    install -m 600 /dev/null "$PASSWORD_FILE"
-    printf '%s\n' "$created_password" > "$PASSWORD_FILE"
+auth_block=""
+if [ "$AUTH" = password ]; then
+    if [ ! -f "$PASSWORD_FILE" ]; then
+        created_password=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)
+        install -m 600 /dev/null "$PASSWORD_FILE"
+        printf '%s\n' "$created_password" > "$PASSWORD_FILE"
+    fi
+    hash=$(caddy hash-password --plaintext "$(cat "$PASSWORD_FILE")")
+    auth_block=$(printf '\tbasicauth {\n\t\tkalshi %s\n\t}' "$hash")
 fi
-hash=$(caddy hash-password --plaintext "$(cat "$PASSWORD_FILE")")
 cat > /etc/caddy/Caddyfile <<CADDY
 # Managed by kalshi-alpha deploy/dashboard.sh. Re-running it overwrites this.
+# Access: $AUTH
 $SITE {
-	basicauth {
-		kalshi $hash
-	}
+$auth_block
 	encode gzip
 	reverse_proxy 127.0.0.1:8080
 }
@@ -66,8 +85,12 @@ ufw allow 80/tcp >/dev/null
 ufw allow 443/tcp >/dev/null
 ufw --force enable >/dev/null
 
-echo "dashboard: https://$SITE  (user: kalshi)"
-if [ -n "$created_password" ]; then
-    echo "a new password was generated and stored at $PASSWORD_FILE"
+if [ "$AUTH" = public ]; then
+    echo "dashboard: https://$SITE  (public, no password)"
+else
+    echo "dashboard: https://$SITE  (user: kalshi)"
+    if [ -n "$created_password" ]; then
+        echo "a new password was generated and stored at $PASSWORD_FILE"
+    fi
+    echo "fetch it with: deploy/dashboard-password.sh $IP"
 fi
-echo "fetch it with: deploy/dashboard-password.sh $IP"
