@@ -519,6 +519,8 @@ async function loadHistory() {
   const opts = {
     width: box.clientWidth || 600,
     height: 280,
+    // UTC like the rest of the page, not the viewer's local zone.
+    tzDate: (ts) => uPlot.tzDate(new Date(ts * 1e3), "Etc/UTC"),
     cursor: { y: false, points: { size: 8, width: 2 } },
     scales: { x: { time: true }, y: { range: (u, min, max) => [Math.max(0, Math.floor((min - 3) / 5) * 5), Math.min(100, Math.ceil((max + 3) / 5) * 5)] } },
     axes: [axis, { ...axis, size: 44, values: (u, vals) => vals.map((v) => `${v}¢`) }],
