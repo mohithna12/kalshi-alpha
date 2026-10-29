@@ -1,0 +1,30 @@
+# The status dashboard. Installed by deploy/dashboard.sh.
+#
+# It shares the VM with capture, and capture is the thing that matters: the
+# dashboard runs at low priority with a CPU and memory ceiling, so a heavy page
+# load slows the page, never the daemon. It binds to localhost only; Caddy is
+# the public face, with TLS and a password.
+[Unit]
+Description=kalshi-alpha status dashboard (read-only)
+After=network.target
+
+[Service]
+Type=simple
+User=kalshi
+Group=kalshi
+# Read access to the capture unit's journal, for the metrics line.
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/home/kalshi/kalshi-alpha
+Environment=KALSHI_CAPTURE_ENV=prod
+Environment=KALSHI_LOG_SOURCE=journal
+Environment=KALSHI_DASHBOARD_HOST=127.0.0.1
+Environment=KALSHI_DASHBOARD_PORT=8080
+ExecStart=/home/kalshi/dashboard-venv/bin/python -I /home/kalshi/kalshi-alpha/dashboard/server.py
+Restart=on-failure
+RestartSec=5
+Nice=10
+CPUQuota=50%
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target

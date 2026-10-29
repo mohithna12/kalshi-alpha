@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capture Status</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11,11,11,0.10);
+  --series-1: #2a78d6;
+  --series-1-wash: rgba(42,120,214,0.10);
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --series-1-wash: rgba(57,135,229,0.12);
+    --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --ring: rgba(255,255,255,0.10);
+  --series-1: #3987e5;
+  --series-1-wash: rgba(57,135,229,0.12);
+  --good-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 20px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; }
+h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.sub { color: var(--ink-2); }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+.status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.status svg { width: 16px; height: 16px; flex: none; }
+.status[data-state="good"] svg { color: var(--good); }
+.status[data-state="warning"] svg { color: var(--warning); }
+.status[data-state="critical"] svg { color: var(--critical); }
+.spacer { flex: 1; }
+
+.card {
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px var(--ring);
+  padding: 16px;
+  margin-bottom: 16px;
+  transition: opacity .2s;
+}
+.card.loading { opacity: .55; }
+.card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 12px; }
+.note { font-size: 12px; color: var(--muted); }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--ring); padding: 12px 14px; }
+.tile .label { font-size: 12px; color: var(--ink-2); }
+.tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+.tile .detail { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+.hero { font-size: 32px; font-weight: 600; line-height: 1.1; }
+
+/* Coverage: one 24h track per UTC day. Captured time is the blue segment;
+   the bare track behind it is time nothing was recorded. */
+.days { display: grid; grid-template-columns: 88px 1fr 64px; gap: 6px 12px; align-items: center; margin-top: 16px; }
+.track { position: relative; height: 14px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.seg { position: absolute; top: 0; bottom: 0; background: var(--series-1); }
+.future { position: absolute; top: 0; bottom: 0; background: var(--surface); }
+.gap-hit { position: absolute; top: -6px; bottom: -6px; min-width: 12px; transform: translateX(-50%); cursor: default; }
+.gap-hit:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.hours { display: grid; grid-template-columns: 88px 1fr 64px; gap: 12px; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.hours div:nth-child(2) { display: flex; justify-content: space-between; }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--ink-2); margin-top: 12px; }
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; }
+.line-key { width: 16px; height: 2px; border-radius: 1px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { font-size: 12px; font-weight: 500; color: var(--ink-2); }
+td.r, th.r { text-align: right; }
+tbody tr.game td { padding-top: 14px; font-size: 12px; color: var(--ink-2); border-bottom: none; }
+tbody tr.mkt { cursor: pointer; }
+tbody tr.mkt:hover td { background: var(--page); }
+tbody tr.mkt[aria-selected="true"] td { background: var(--series-1-wash); }
+tbody tr.mkt:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+.scroll { overflow-x: auto; }
+.won { color: var(--good-text); font-weight: 600; }
+
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.seg-ctl { display: inline-flex; border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); overflow: hidden; }
+.seg-ctl button {
+  font: inherit; font-size: 13px; color: var(--ink-2); background: none;
+  border: 0; padding: 5px 12px; cursor: pointer;
+}
+.seg-ctl button[aria-pressed="true"] { background: var(--series-1-wash); color: var(--ink); font-weight: 600; }
+.seg-ctl button:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+#chart { min-height: 280px; margin-top: 8px; }
+.empty { color: var(--muted); padding: 24px 0; text-align: center; }
+
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none;
+  background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--ring), 0 4px 16px rgba(0,0,0,.12);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 260px;
+}
+#tip strong { display: block; font-size: 13px; }
+
+/* uPlot chrome on the page's tokens. */
+.uplot { font-family: inherit; }
+.u-legend { font-size: 12px; color: var(--ink-2); text-align: left; margin-top: 4px; }
+.u-legend .u-value { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.u-legend th { font-weight: 400; color: var(--ink-2); }
+.u-legend .u-marker { border-radius: 1px; height: 2px !important; width: 16px !important; margin-bottom: 3px; }
+
+@media (max-width: 640px) {
+  .days, .hours { grid-template-columns: 64px 1fr 52px; gap: 6px 8px; }
+  .hero { font-size: 26px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>kalshi-alpha capture</h1>
+    <span class="sub" id="env">production, read-only</span>
+    <span class="spacer"></span>
+    <span class="status" id="status" data-state="warning" role="status">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="currentColor"/></svg>
+      <span>Loading</span>
+    </span>
+  </header>
+
+  <section class="tiles" id="tiles" aria-label="Capture health"></section>
+
+  <section class="card" id="coverage-card">
+    <div class="card-head">
+      <h2>Coverage</h2>
+      <span class="note">Last 7 UTC days, from session records. A gap is time nothing was recorded.</span>
+    </div>
+    <div class="hero num" id="cov-hero">&nbsp;</div>
+    <div class="sub" id="cov-sub">&nbsp;</div>
+    <div class="days" id="days"></div>
+    <div class="hours"><div></div><div><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div><div></div></div>
+    <div class="legend">
+      <span class="key"><span class="swatch" style="background:var(--series-1)"></span>Captured</span>
+      <span class="key"><span class="swatch" style="background:var(--grid)"></span>Not captured</span>
+    </div>
+    <div class="scroll" style="margin-top:16px">
+      <table aria-label="Gaps longer than two minutes">
+        <thead><tr><th>Gap from (UTC)</th><th>To</th><th class="r">Length</th></tr></thead>
+        <tbody id="gaps"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="chart-card">
+    <div class="card-head">
+      <h2 id="chart-title">Price history</h2>
+      <span class="note" id="chart-note">Pick a market below.</span>
+      <span class="spacer"></span>
+      <div class="seg-ctl" role="group" aria-label="Time range" id="range">
+        <button type="button" data-hours="6" aria-pressed="false">6h</button>
+        <button type="button" data-hours="24" aria-pressed="true">24h</button>
+        <button type="button" data-hours="168" aria-pressed="false">7d</button>
+      </div>
+    </div>
+    <div id="chart"><div class="empty">No market selected.</div></div>
+  </section>
+
+  <section class="card" id="markets-card">
+    <div class="card-head">
+      <h2>Markets</h2>
+      <span class="note" id="markets-note">Prices lag the wire by up to one file roll (5 min).</span>
+    </div>
+    <div class="scroll">
+      <table aria-label="Captured markets">
+        <thead><tr>
+          <th>Outcome</th><th class="r">Yes bid</th><th class="r">Yes ask</th><th class="r">Last</th>
+          <th class="r">Volume</th><th>Result</th><th class="r">Updated</th>
+        </tr></thead>
+        <tbody id="markets"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<div id="tip" role="tooltip"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, kids = []) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "text") node.textContent = v;
+    else if (k === "class") node.className = v;
+    else node.setAttribute(k, v);
+  }
+  for (const kid of kids) node.append(kid);
+  return node;
+};
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+const fmtInt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const fmtCompact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+const cents = (v) => (v == null ? "–" : `${Math.round(v * 100)}¢`);
+const bytes = (n) => {
+  if (n == null) return "–";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${u[i]}`;
+};
+const duration = (s) => {
+  if (s == null) return "–";
+  s = Math.max(0, Math.round(s));
+  if (s < 90) return `${s}s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)} h`;
+  return `${(s / 86400).toFixed(1)} d`;
+};
+const utc = (iso) => (iso ? iso.slice(0, 16).replace("T", " ") : "–");
+const ago = (iso) => (iso ? duration((Date.now() - Date.parse(iso)) / 1000) + " ago" : "–");
+
+async function get(path) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return res.json();
+}
+// Refetch keeps the frame: dim, don't blank.
+async function refresh(card, fn) {
+  card && card.classList.add("loading");
+  try { await fn(); } catch (err) { console.error(err); }
+  finally { card && card.classList.remove("loading"); }
+}
+
+// --- tooltip ---------------------------------------------------------------
+const tip = $("tip");
+function showTip(target, value, label) {
+  tip.replaceChildren(el("strong", { text: value }), el("span", { class: "sub", text: label }));
+  tip.style.display = "block";
+  const r = target.getBoundingClientRect();
+  const w = tip.offsetWidth;
+  tip.style.left = `${Math.min(Math.max(8, r.left + r.width / 2 - w / 2), innerWidth - w - 8)}px`;
+  tip.style.top = `${r.top - tip.offsetHeight - 8}px`;
+}
+const hideTip = () => { tip.style.display = "none"; };
+
+// --- status + tiles --------------------------------------------------------
+const ICONS = {
+  good: '<path fill="currentColor" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm3.2 5.2-3.8 4.2a.8.8 0 0 1-1.1.1L4.6 8.9a.8.8 0 1 1 1-1.2l1.1 1 3.3-3.6a.8.8 0 1 1 1.2 1.1Z"/>',
+  warning: '<path fill="currentColor" d="M8.9 1.6a1 1 0 0 0-1.8 0L.6 13.4A1 1 0 0 0 1.5 15h13a1 1 0 0 0 .9-1.6L8.9 1.6ZM8 5c.4 0 .8.3.8.8v3.6a.8.8 0 0 1-1.6 0V5.8c0-.5.4-.8.8-.8Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/>',
+  critical: '<path fill="currentColor" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm2.6 8.5a.8.8 0 1 1-1.1 1.1L8 9.1l-1.5 1.5a.8.8 0 1 1-1.1-1.1L6.9 8 5.4 6.5a.8.8 0 1 1 1.1-1.1L8 6.9l1.5-1.5a.8.8 0 1 1 1.1 1.1L9.1 8l1.5 1.5Z"/>',
+};
+function setStatus(state, label) {
+  const node = $("status");
+  node.dataset.state = state;
+  node.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true">${ICONS[state]}</svg>`;
+  node.append(el("span", { text: label }));
+}
+
+function tile(label, value, detail) {
+  return el("div", { class: "tile" }, [
+    el("div", { class: "label", text: label }),
+    el("div", { class: "value num", text: value }),
+    el("div", { class: "detail", text: detail || " " }),
+  ]);
+}
+
+async function loadStatus() {
+  const s = await get("/api/status");
+  const age = s.heartbeat_age_s;
+  const m = (s.metrics && s.metrics.fields) || {};
+  const metricsAge = s.metrics ? (Date.now() - Date.parse(s.metrics.at)) / 1000 : null;
+
+  if (age == null) setStatus("critical", "No heartbeat");
+  else if (age > s.stale_after_s) setStatus("critical", `Stalled, ${duration(age)} since heartbeat`);
+  else if ((m.rows_lost || 0) > 0 || (m.reconciliation_misses || 0) > 0) setStatus("warning", "Capturing, with issues");
+  else setStatus("good", "Capturing");
+
+  const sess = s.session || {};
+  $("env").textContent = `${s.environment === "prod" ? "production" : s.environment}, read-only` +
+    (sess.git_sha ? ` · build ${sess.git_sha.slice(0, 7)}` : "");
+
+  $("tiles").replaceChildren(
+    tile("Heartbeat", age == null ? "–" : `${Math.round(age)}s ago`, `stalled after ${s.stale_after_s}s`),
+    tile("Messages / sec", m.messages_per_sec == null ? "–" : m.messages_per_sec.toFixed(1),
+      metricsAge == null ? "no metrics yet" : `${fmtCompact.format(m.messages_total || 0)} this session`),
+    tile("Session uptime", sess.started_at ? duration((Date.now() - Date.parse(sess.started_at)) / 1000) : "–",
+      sess.started_at ? `since ${utc(sess.started_at)}Z` : ""),
+    tile("Reconnects", m.reconnects == null ? "–" : fmtInt.format(m.reconnects),
+      m.idle_timeouts ? `${m.idle_timeouts} idle timeouts` : "this session"),
+    tile("Rows lost", m.rows_lost == null ? "–" : fmtInt.format(m.rows_lost),
+      m.reconciliation_misses ? `${m.reconciliation_misses} reconciliation misses` : "queue to disk"),
+    tile("Disk free", bytes(s.disk.free), `data uses ${bytes(s.disk.data)}`),
+  );
+}
+
+// --- coverage --------------------------------------------------------------
+async function loadCoverage() {
+  const c = await get("/api/coverage?days=7");
+  const pct = c.span_s ? (c.covered_s / c.span_s) * 100 : 0;
+  const missing = c.span_s - c.covered_s;
+  $("cov-hero").textContent = `${pct.toFixed(2)}%`;
+  $("cov-sub").textContent = `${duration(missing)} not captured, across ${c.gaps.length} gap${c.gaps.length === 1 ? "" : "s"} over two minutes`;
+
+  const covered = c.covered.map(([a, b]) => [Date.parse(a), Date.parse(b)]);
+  const rows = [];
+  for (const day of c.per_day) {
+    const start = Date.parse(day.date + "T00:00:00Z");
+    const end = start + 86400e3;
+    const track = el("div", { class: "track" });
+    for (const [a, b] of covered) {
+      const s = Math.max(a, start), e = Math.min(b, end);
+      if (e <= s) continue;
+      track.append(el("div", {
+        class: "seg",
+        style: `left:${((s - start) / 864e5) * 100}%;width:${((e - s) / 864e5) * 100}%`,
+      }));
+    }
+    // Time that has not happened yet is not a gap: hide that part of today's track.
+    const now = Date.now();
+    if (now < end) {
+      track.append(el("div", {
+        class: "future",
+        style: `left:${((now - start) / 864e5) * 100}%;right:0`,
+      }));
+    }
+    const wrap = el("div", { style: "position:relative" }, [track]);
+    for (const g of c.gaps) {
+      const a = Date.parse(g.from), b = Date.parse(g.to);
+      const s = Math.max(a, start), e = Math.min(b, end);
+      if (e <= s) continue;
+      const hit = el("div", {
+        class: "gap-hit", tabindex: "0",
+        style: `left:${(((s + e) / 2 - start) / 864e5) * 100}%;width:${Math.max(((e - s) / 864e5) * 100, 0)}%`,
+        "aria-label": `Gap of ${duration(g.seconds)} from ${utc(g.from)} to ${utc(g.to)} UTC`,
+      });
+      const show = () => showTip(hit, `${duration(g.seconds)} not captured`, `${utc(g.from)} → ${utc(g.to)} UTC`);
+      hit.addEventListener("pointerenter", show);
+      hit.addEventListener("focus", show);
+      hit.addEventListener("pointerleave", hideTip);
+      hit.addEventListener("blur", hideTip);
+      wrap.append(hit);
+    }
+    const dayPct = day.span_s ? (day.covered_s / day.span_s) * 100 : 0;
+    rows.push(
+      el("div", { class: "num sub", text: day.date.slice(5) }),
+      wrap,
+      el("div", { class: "num", style: "text-align:right", text: `${dayPct.toFixed(1)}%` }),
+    );
+  }
+  $("days").replaceChildren(...rows);
+
+  const body = c.gaps.slice(0, 12).map((g) => el("tr", {}, [
+    el("td", { class: "num", text: utc(g.from) }),
+    el("td", { class: "num", text: utc(g.to) }),
+    el("td", { class: "num r", text: duration(g.seconds) }),
+  ]));
+  $("gaps").replaceChildren(...(body.length ? body : [el("tr", {}, [el("td", { colspan: "3", class: "muted", text: "No gaps over two minutes." })])]));
+}
+
+// --- markets ---------------------------------------------------------------
+let selected = null;
+let hours = 24;
+
+function gameLabel(event, outcomes) {
+  const code = event.split("-").pop().replace(/^\d{2}[A-Z]{3}\d{2}/, "");
+  const [a, b] = outcomes;
+  if (a && b && code === a + b) return `${a} at ${b}`;
+  if (a && b && code === b + a) return `${b} at ${a}`;
+  return code || event;
+}
+
+async function loadMarkets() {
+  const data = await get("/api/markets");
+  $("markets-note").textContent = `Prices as of ${ago(data.as_of)}. They lag the wire by up to one file roll (5 min).`;
+
+  const games = new Map();
+  for (const m of data.markets) {
+    if (!games.has(m.event)) games.set(m.event, []);
+    games.get(m.event).push(m);
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const ordered = [...games.entries()].sort(([, a], [, b]) => {
+    const da = a[0].event_date || "", db = b[0].event_date || "";
+    const sa = a.some((m) => m.result), sb = b.some((m) => m.result);
+    if (sa !== sb) return sa ? 1 : -1;          // open games first
+    return sa ? db.localeCompare(da) : da.localeCompare(db);
+  });
+
+  const rows = [];
+  for (const [event, ms] of ordered) {
+    ms.sort((a, b) => a.outcome.localeCompare(b.outcome));
+    const settled = ms.some((m) => m.result);
+    const when = ms[0].event_date;
+    const label = `${gameLabel(event, ms.map((m) => m.outcome))} · ${when || "date unknown"}` +
+      (settled ? " · settled" : when === today ? " · today" : "");
+    rows.push(el("tr", { class: "game" }, [el("td", { colspan: "7", text: label })]));
+    for (const m of ms) {
+      const result = m.result == null ? el("span", { class: "muted", text: "open" })
+        : m.result === "yes" ? el("span", { class: "won", text: "Won" })
+        : el("span", { class: "sub", text: "Lost" });
+      const row = el("tr", { class: "mkt", tabindex: "0", "aria-selected": String(m.ticker === selected) }, [
+        el("td", { text: m.outcome }),
+        el("td", { class: "num r", text: cents(m.yes_bid) }),
+        el("td", { class: "num r", text: cents(m.yes_ask) }),
+        el("td", { class: "num r", text: cents(m.last) }),
+        el("td", { class: "num r", text: m.volume == null ? "–" : fmtCompact.format(m.volume) }),
+        el("td", {}, [result]),
+        el("td", { class: "num r muted", text: ago(m.updated_at) }),
+      ]);
+      const pick = () => selectMarket(m.ticker, `${gameLabel(event, ms.map((x) => x.outcome))}: ${m.outcome} to win`);
+      row.addEventListener("click", pick);
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+      rows.push(row);
+    }
+  }
+  $("markets").replaceChildren(...(rows.length ? rows : [el("tr", {}, [el("td", { colspan: "7", class: "muted", text: "No markets captured in the last two days." })])]));
+
+  if (!selected) {
+    const first = ordered.find(([, ms]) => !ms.some((m) => m.result)) || ordered[0];
+    if (first) {
+      const m = first[1][0];
+      selectMarket(m.ticker, `${gameLabel(first[0], first[1].map((x) => x.outcome))}: ${m.outcome} to win`);
+    }
+  }
+}
+
+// --- chart -----------------------------------------------------------------
+let plot = null;
+let chartLabel = "";
+
+function selectMarket(ticker, label) {
+  selected = ticker;
+  chartLabel = label;
+  // The markets refresh below re-renders the rows with the new selection.
+  refresh($("chart-card"), loadHistory);
+  refresh(null, loadMarkets);
+}
+
+async function loadHistory() {
+  if (!selected) return;
+  const h = await get(`/api/history?market=${encodeURIComponent(selected)}&hours=${hours}`);
+  $("chart-title").textContent = chartLabel || selected;
+  $("chart-note").textContent = `${selected} · ${h.bucket_s >= 3600 ? h.bucket_s / 3600 + " h" : h.bucket_s / 60 + " min"} buckets`;
+  const box = $("chart");
+  if (!h.t.length) {
+    if (plot) { plot.destroy(); plot = null; }
+    box.replaceChildren(el("div", { class: "empty", text: "No ticker updates for this market in the selected range." }));
+    return;
+  }
+  const toC = (v) => (v == null ? null : v * 100);
+  const data = [h.t, h.yes_bid.map(toC), h.yes_ask.map(toC), h.last.map(toC)];
+  const blue = css("--series-1"), wash = css("--series-1-wash"), grid = css("--grid"), muted = css("--muted");
+  const axis = { stroke: muted, grid: { stroke: grid, width: 1 }, ticks: { show: false }, font: "11px system-ui, sans-serif" };
+  const opts = {
+    width: box.clientWidth || 600,
+    height: 280,
+    cursor: { y: false, points: { size: 8, width: 2 } },
+    scales: { x: { time: true }, y: { range: (u, min, max) => [Math.max(0, Math.floor((min - 3) / 5) * 5), Math.min(100, Math.ceil((max + 3) / 5) * 5)] } },
+    axes: [axis, { ...axis, size: 44, values: (u, vals) => vals.map((v) => `${v}¢`) }],
+    series: [
+      { value: (u, v) => (v == null ? "–" : new Date(v * 1000).toISOString().slice(5, 16).replace("T", " ") + " UTC") },
+      { label: "Yes bid", stroke: "transparent", value: (u, v) => (v == null ? "–" : `${Math.round(v)}¢`), points: { show: false } },
+      { label: "Yes ask", stroke: "transparent", value: (u, v) => (v == null ? "–" : `${Math.round(v)}¢`), points: { show: false } },
+      { label: "Last trade", stroke: blue, width: 2, value: (u, v) => (v == null ? "–" : `${Math.round(v)}¢`), points: { show: false } },
+    ],
+    bands: [{ series: [2, 1], fill: wash }],
+    legend: { live: true },
+  };
+  if (plot) plot.destroy();
+  box.replaceChildren();
+  // With the cursor off the plot, the readout shows the latest bucket rather
+  // than dashes. uPlot draws asynchronously, so this hooks its first draw.
+  const latest = (u) => u.setLegend({ idx: data[0].length - 1 });
+  opts.hooks = {
+    ready: [(u) => requestAnimationFrame(() => latest(u))],
+    setCursor: [(u) => { if (u.cursor.idx == null) latest(u); }],
+  };
+  plot = new uPlot(opts, data, box);
+  // The bid/ask rows key the shaded band, the last-trade row keys the line.
+  const markers = box.querySelectorAll(".u-legend .u-marker");
+  if (markers[1]) { markers[1].style.background = wash; markers[1].style.height = "10px"; markers[1].style.borderColor = "transparent"; }
+  if (markers[2]) { markers[2].style.background = wash; markers[2].style.height = "10px"; markers[2].style.borderColor = "transparent"; }
+}
+
+$("range").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  hours = Number(btn.dataset.hours);
+  for (const b of $("range").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === btn));
+  refresh($("chart-card"), loadHistory);
+});
+let resizeTimer;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (plot) plot.setSize({ width: $("chart").clientWidth, height: 280 }); }, 150);
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => refresh($("chart-card"), loadHistory));
+
+// --- schedule --------------------------------------------------------------
+refresh(null, loadStatus);
+refresh($("coverage-card"), loadCoverage);
+refresh($("markets-card"), loadMarkets);
+setInterval(() => refresh(null, loadStatus), 15000);
+setInterval(() => refresh($("coverage-card"), loadCoverage), 60000);
+setInterval(() => refresh($("markets-card"), loadMarkets), 60000);
+setInterval(() => refresh(null, loadHistory), 60000);
+</script>
+</body>
+</html>

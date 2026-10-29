@@ -16,6 +16,9 @@ data-server/
 /target/
 **/*.rs.bk
 
+# --- Python ---
+__pycache__/
+
 # --- Local operational state ---
 # Runtime artifacts of a capture run. These churn on every start and belong to
 # the machine, not the repository. capture.log was tracked once by accident --

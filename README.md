@@ -702,6 +702,27 @@ rebuilds, and restarts. What runs on the server differs from the laptop:
 - **No alerts yet.** Failures land in `journalctl -u kalshi-capture` and
   nowhere else. On a server nobody watches, that is the next gap to close.
 
+### Status dashboard
+
+`dashboard/` is a read-only web page for a capture host. It shows the
+heartbeat, the latest metrics line, disk, coverage and its gaps, and every
+captured market with a price chart. It is Python's standard library plus
+DuckDB over the Parquet files, and it never contacts Kalshi or writes under
+`data/`.
+
+```sh
+ssh root@HOST 'bash -s' < deploy/dashboard.sh   # install/upgrade; Caddy + TLS + password
+deploy/dashboard-password.sh HOST               # password into ~/.kalshi/, never printed
+python3 dashboard/server.py                     # locally, against ./data (KALSHI_LOG_SOURCE=capture.log)
+```
+
+Health numbers are live. **Market prices lag by up to one file roll (5
+min)**, because a Parquet file has no footer, and so cannot be read, until the
+daemon closes it. The page says so next to the prices. The dashboard runs at
+`Nice=10` with a CPU and memory cap, because it shares the box with capture.
+It also writes no bytecode: an untracked `__pycache__/` in the tree would make
+production capture refuse to start.
+
 Keep the laptop capturing until the server has covered a full game window
 cleanly, then compare the two with `just coverage` and `just readback`.
 Server data goes to `data-server/`, never `data/`, so that overlapping hours

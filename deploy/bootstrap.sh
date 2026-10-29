@@ -77,5 +77,8 @@ fi
 # Restart rather than start, so an upgrade picks up the new binary.
 systemctl restart kalshi-capture.service
 systemctl start kalshi-heartbeat.timer
+if systemctl is-enabled --quiet kalshi-dashboard.service 2>/dev/null; then
+    systemctl restart kalshi-dashboard.service
+fi
 sleep 5
 systemctl --no-pager --lines=5 status kalshi-capture.service || true
