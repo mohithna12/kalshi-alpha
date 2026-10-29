@@ -19,6 +19,8 @@ Environment=KALSHI_CAPTURE_ENV=prod
 Environment=KALSHI_LOG_SOURCE=journal
 Environment=KALSHI_DASHBOARD_HOST=127.0.0.1
 Environment=KALSHI_DASHBOARD_PORT=8080
+# The GitHub Pages copy of the page reads the JSON from here.
+Environment=KALSHI_DASHBOARD_CORS_ORIGIN=https://mohithna12.github.io
 ExecStart=/home/kalshi/dashboard-venv/bin/python -I /home/kalshi/kalshi-alpha/dashboard/server.py
 Restart=on-failure
 RestartSec=5

@@ -63,6 +63,9 @@ STALE_SECONDS = 180
 CHART_HOURS = (6, 24, 168)
 COVERAGE_DAYS = 7
 RATE_LIMIT = int(os.environ.get("KALSHI_DASHBOARD_RATE_LIMIT", "120"))
+# A second origin allowed to read the JSON, for the copy of the page hosted on
+# GitHub Pages. Exactly one origin, never "*".
+CORS_ORIGIN = os.environ.get("KALSHI_DASHBOARD_CORS_ORIGIN", "")
 PX = 1_000_000
 QTY = 100
 
@@ -514,6 +517,11 @@ class Handler(BaseHTTPRequestHandler):
             print(f"error serving {url.path}: {exc!r}", file=sys.stderr)
             return self.fail(500, "query failed")
 
+    def cors(self):
+        if CORS_ORIGIN and self.headers.get("Origin") == CORS_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
+            self.send_header("Vary", "Origin")
+
     def client(self):
         """The visitor's IP. Behind Caddy that is X-Forwarded-For, which is
         only trusted from the local proxy."""
@@ -528,6 +536,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
+        self.cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if not self.head_only:
@@ -570,6 +579,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps({"error": message}).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if not self.head_only:

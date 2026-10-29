@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-api="">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -269,8 +269,11 @@ const duration = (s) => {
 const utc = (iso) => (iso ? iso.slice(0, 16).replace("T", " ") : "–");
 const ago = (iso) => (iso ? duration((Date.now() - Date.parse(iso)) / 1000) + " ago" : "–");
 
+// Where the JSON lives. Empty when the page is served by dashboard/server.py
+// itself; the GitHub Pages build stamps in the capture host's origin.
+const API = document.documentElement.dataset.api || "";
 async function get(path) {
-  const res = await fetch(path, { cache: "no-store" });
+  const res = await fetch(API + path, { cache: "no-store" });
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return res.json();
 }

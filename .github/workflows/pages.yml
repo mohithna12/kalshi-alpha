@@ -1,0 +1,51 @@
+# Publish the dashboard page to GitHub Pages.
+#
+# The capture host serves the same page itself, but at an sslip.io address,
+# which LinkedIn (and other link checkers) will not accept. This copy lives on
+# github.io and reads its live data from the capture host, which allows this
+# origin through CORS (KALSHI_DASHBOARD_CORS_ORIGIN in kalshi-dashboard.service).
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["dashboard/static/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  API_ORIGIN: https://46-225-176-97.sslip.io
+  SITE_ORIGIN: https://mohithna12.github.io/kalshi-alpha
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          mkdir -p site
+          sed -e "s|data-api=\"\"|data-api=\"$API_ORIGIN\"|" \
+              -e "s|{{origin}}|$SITE_ORIGIN|g" \
+              dashboard/static/index.html > site/index.html
+          cp dashboard/static/preview.png site/
+          # Fail rather than publish a page that cannot find its data.
+          grep -q "data-api=\"$API_ORIGIN\"" site/index.html
+          ! grep -q "{{origin}}" site/index.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
