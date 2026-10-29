@@ -1,0 +1,38 @@
+# Production capture under systemd. Installed by deploy/bootstrap.sh.
+#
+# systemd replaces scripts/watchdog.sh on a server: it restarts on exit, owns
+# the one process (no pid file to go stale), and brakes a crash loop with the
+# same 5-per-hour limit. The one thing it cannot see is a process that is alive
+# but wedged -- that is kalshi-heartbeat.timer's job.
+[Unit]
+Description=kalshi-alpha market-data capture (production, read-only)
+Wants=network-online.target
+After=network-online.target
+# The crash-loop brake: more than 5 starts in an hour needs a human.
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=kalshi
+Group=kalshi
+WorkingDirectory=/home/kalshi/kalshi-alpha
+Environment=HOME=/home/kalshi
+Environment=KALSHI_ENV=prod
+# KALSHI_AUTH__KEY_ID and KALSHI_AUTH__PRIVATE_KEY_PATH. No shell expansion
+# happens here, so the key path must be absolute.
+EnvironmentFile=/home/kalshi/kalshi-alpha/.env
+# Refuse to start onto a nearly full volume. ENOSPC ended the 2026-09-10
+# session, and a daemon relaunched onto a full disk dies the same way.
+ExecStartPre=/home/kalshi/kalshi-alpha/deploy/disk-floor.sh
+ExecStart=/home/kalshi/kalshi-alpha/target/release/capture --env prod --i-understand-this-is-production
+Restart=always
+RestartSec=10
+# SIGTERM lets the writer close its open Parquet files; 30s matches the
+# watchdog's grace period before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Logs go to the journal, which rotates them: `journalctl -u kalshi-capture`.
+
+[Install]
+WantedBy=multi-user.target

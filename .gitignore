@@ -10,6 +10,7 @@ secrets/
 
 # --- Captured data. Append-only, large, irreplaceable; lives outside git. ---
 data/
+data-server/
 
 # --- Rust build artifacts ---
 /target/

@@ -675,6 +675,38 @@ just test        # unit tests
 just check       # fmt + clippy + test
 ```
 
+## Running on a server
+
+The laptop lost 23.4h in 25 days, almost all of it to sleep. `deploy/` moves
+capture onto any always-on Ubuntu 24.04 VM: 2 vCPU, 2GB+ RAM, 40GB disk is
+plenty (capture writes about 90MB a day). Pick a US East region, since Kalshi
+serves from there and `received_at_ns` includes the network path.
+
+```sh
+ssh root@HOST 'bash -s' < deploy/bootstrap.sh   # build + install units, not started
+deploy/push-credentials.sh HOST                 # key over ssh, mode 600; starts capture
+deploy/pull-data.sh HOST                        # rsync data down into ./data-server/
+```
+
+Re-running `bootstrap.sh` is the upgrade path: it fast-forwards to `main`,
+rebuilds, and restarts. What runs on the server differs from the laptop:
+
+- **systemd replaces `watchdog.sh`.** `Restart=always`, with the same brake of 5
+  starts per hour (`StartLimitBurst`), and a disk floor checked before every
+  start. There is no pid file to go stale.
+- **`kalshi-heartbeat.timer` covers the wedged case.** systemd restarts a
+  process that exits. It does not notice one that is alive and stuck, which
+  is how the 5.9-day outage happened. Every 5 minutes it restarts an active
+  unit whose heartbeat is older than 180s, and it leaves a failed unit alone
+  so the brake keeps working.
+- **No alerts yet.** Failures land in `journalctl -u kalshi-capture` and
+  nowhere else. On a server nobody watches, that is the next gap to close.
+
+Keep the laptop capturing until the server has covered a full game window
+cleanly, then compare the two with `just coverage` and `just readback`.
+Server data goes to `data-server/`, never `data/`, so that overlapping hours
+are not counted twice.
+
 ## Status
 
 | # | Deliverable | State |

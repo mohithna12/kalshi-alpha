@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart kalshi-alpha capture if its heartbeat is stale
+
+[Service]
+Type=oneshot
+ExecStart=/home/kalshi/kalshi-alpha/deploy/heartbeat-check.sh
