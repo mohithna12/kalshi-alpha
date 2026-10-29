@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- Source of dashboard/static/preview.png, the link-preview image (1200x627).
+     Data: KXNFLGAME-26OCT12BUFLAR-BUF last-trade price, one-minute buckets,
+     from this repo's own capture. Regenerate the PNG with:
+     chrome --headless=new --force-device-scale-factor=1 --window-size=1200,627 \
+       --screenshot=dashboard/static/preview.png dashboard/preview/card.html -->
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0}
+body{width:1200px;height:627px;background:#f9f9f7;color:#0b0b0b;
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;align-items:center}
+.text{width:520px;padding:0 0 0 72px}
+.kicker{font-size:20px;color:#52514e;margin-bottom:14px}
+h1{font-size:58px;line-height:1.05;margin:0 0 22px;font-weight:700;letter-spacing:-0.5px}
+p{font-size:24px;line-height:1.4;color:#52514e;margin:0}
+.chart{margin-left:auto;margin-right:56px;background:#fcfcfb;border-radius:20px;
+  box-shadow:0 0 0 1px rgba(11,11,11,.10);padding:28px 28px 16px}
+.cap{font-size:18px;color:#52514e;margin:0 0 6px 8px}
+.cap b{color:#0b0b0b;font-weight:600}
+.grid{stroke:#e1e0d9;stroke-width:1}
+.tick{fill:#898781;font-size:14px}
+.line{fill:none;stroke:#2a78d6;stroke-width:3;stroke-linejoin:round;stroke-linecap:round}
+.lbl{fill:#0b0b0b;font-size:17px;font-weight:600}
+</style></head><body>
+<div class="text">
+  <div class="kicker">kalshi-alpha</div>
+  <h1>Kalshi&#8217;s NFL markets, tick by tick.</h1>
+  <p>A read-only capture of the order book, trades and settlements, with a live dashboard.</p>
+</div>
+<div class="chart">
+  <div class="cap"><b>BUF at LAR, Oct 12.</b> Buffalo to win, last trade.</div>
+  <svg width="560" height="380" viewBox="0 0 560 380">
+    <line x1="8" x2="552" y1="344.0" y2="344.0" class="grid"/><text x="8" y="339.0" class="tick" text-anchor="start">0¢</text><line x1="8" x2="552" y1="182.0" y2="182.0" class="grid"/><text x="8" y="177.0" class="tick" text-anchor="start">50¢</text><line x1="8" x2="552" y1="20.0" y2="20.0" class="grid"/><text x="8" y="15.0" class="tick" text-anchor="start">100¢</text><text x="8.0" y="368" class="tick" text-anchor="start">23:47 UTC</text><text x="552.0" y="368" class="tick" text-anchor="end">03:48 UTC</text>
+    <path class="line" d="M8.0,217.6 L10.3,217.6 L12.5,217.6 L14.8,217.6 L17.0,217.6 L19.3,217.6 L21.5,217.6 L23.8,217.6 L26.1,217.6 L28.3,217.6 L30.6,217.6 L35.1,217.6 L39.6,217.6 L41.9,217.6 L53.1,217.6 L71.2,217.6 L84.7,217.6 L87.0,214.4 L89.3,214.4 L91.5,211.2 L93.8,220.9 L96.0,217.6 L98.3,214.4 L100.5,220.9 L102.8,214.4 L105.1,217.6 L107.3,201.4 L109.6,182.0 L111.8,182.0 L114.1,182.0 L116.3,185.2 L118.6,175.5 L120.9,178.8 L123.1,169.0 L125.4,162.6 L127.6,165.8 L129.9,182.0 L132.1,182.0 L134.4,182.0 L136.7,185.2 L138.9,185.2 L141.2,185.2 L143.4,191.7 L145.7,195.0 L148.0,201.4 L150.2,207.9 L152.5,211.2 L154.7,207.9 L157.0,207.9 L159.2,207.9 L161.5,201.4 L163.8,204.7 L166.0,211.2 L168.3,217.6 L170.5,224.1 L172.8,220.9 L175.0,224.1 L177.3,220.9 L179.6,220.9 L181.8,211.2 L184.1,217.6 L186.3,217.6 L188.6,217.6 L190.8,217.6 L193.1,175.5 L195.4,175.5 L197.6,172.3 L199.9,175.5 L202.1,175.5 L204.4,178.8 L206.6,188.5 L208.9,175.5 L211.2,191.7 L213.4,188.5 L215.7,185.2 L217.9,185.2 L220.2,185.2 L222.4,172.3 L224.7,162.6 L227.0,162.6 L229.2,162.6 L231.5,165.8 L233.7,162.6 L236.0,162.6 L238.2,165.8 L240.5,178.8 L242.8,182.0 L245.0,178.8 L247.3,175.5 L249.5,172.3 L251.8,169.0 L254.0,169.0 L256.3,169.0 L258.6,169.0 L260.8,169.0 L263.1,172.3 L265.3,169.0 L267.6,169.0 L269.8,172.3 L272.1,169.0 L274.4,169.0 L276.6,169.0 L278.9,169.0 L281.1,169.0 L283.4,169.0 L285.6,175.5 L287.9,175.5 L290.2,156.1 L292.4,191.7 L294.7,198.2 L296.9,198.2 L299.2,201.4 L301.4,207.9 L303.7,211.2 L306.0,207.9 L308.2,207.9 L310.5,188.5 L312.7,188.5 L315.0,204.7 L317.2,217.6 L319.5,227.4 L321.8,224.1 L324.0,227.4 L326.3,227.4 L328.5,220.9 L330.8,191.7 L333.0,191.7 L335.3,191.7 L337.6,191.7 L339.8,217.6 L342.1,198.2 L344.3,169.0 L346.6,182.0 L348.8,162.6 L351.1,169.0 L353.4,185.2 L355.6,159.3 L357.9,149.6 L360.1,149.6 L362.4,159.3 L364.6,162.6 L366.9,165.8 L369.2,165.8 L371.4,159.3 L373.7,162.6 L375.9,214.4 L378.2,201.4 L380.4,201.4 L382.7,201.4 L385.0,211.2 L387.2,211.2 L389.5,211.2 L391.7,207.9 L394.0,217.6 L396.2,198.2 L398.5,198.2 L400.8,204.7 L403.0,182.0 L405.3,175.5 L407.5,146.4 L409.8,139.9 L412.0,126.9 L414.3,123.7 L416.6,120.4 L418.8,126.9 L421.1,133.4 L423.3,123.7 L425.6,130.2 L427.9,143.1 L430.1,159.3 L432.4,172.3 L434.6,162.6 L436.9,178.8 L439.1,175.5 L441.4,175.5 L443.7,175.5 L445.9,175.5 L448.2,178.8 L450.4,156.1 L452.7,159.3 L454.9,146.4 L457.2,123.7 L459.5,152.8 L461.7,152.8 L464.0,146.4 L466.2,146.4 L468.5,97.8 L470.7,101.0 L473.0,78.3 L475.3,75.1 L477.5,84.8 L479.8,139.9 L482.0,110.7 L484.3,152.8 L486.5,146.4 L488.8,169.0 L491.1,188.5 L493.3,195.0 L495.6,191.7 L497.8,191.7 L500.1,191.7 L502.3,195.0 L504.6,214.4 L506.9,143.1 L509.1,233.8 L511.4,263.0 L513.6,292.2 L515.9,298.6 L518.1,298.6 L520.4,314.8 L522.7,321.3 L524.9,311.6 L527.2,308.4 L529.4,305.1 L531.7,285.7 L533.9,143.1 L536.2,123.7 L538.5,71.8 L540.7,52.4 L543.0,45.9 L545.2,49.2 L547.5,49.2 L549.7,23.2 L552.0,23.2"/>
+    <circle cx="522.7" cy="321.3" r="6" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+    <text x="510.7" y="325.3" class="lbl" text-anchor="end">7¢ at 03:35</text>
+    <circle cx="552.0" cy="23.2" r="6" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+    <text x="540.0" y="49.2" class="lbl" text-anchor="end">won, 99¢</text>
+  </svg>
+</div>
+</body></html>
