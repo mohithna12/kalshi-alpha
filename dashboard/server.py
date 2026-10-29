@@ -281,11 +281,13 @@ def coverage_report(days):
         hour=0, minute=0, second=0, microsecond=0
     )
     intervals = []
+    first_start = None
     for meta in coverage.load_sessions(DATA).values():
         start = coverage.parse_ts(meta.get("started_at"))
         end = coverage.parse_ts(meta.get("ended_at"))
         if start is None:
             continue
+        first_start = start if first_start is None else min(first_start, start)
         if end is None:
             # Same rule as the CLI: an open session under a day old is live.
             if (now - start).total_seconds() >= 86400:
@@ -295,12 +297,18 @@ def coverage_report(days):
             intervals.append([max(start, window_start), min(end, now)])
     covered = coverage.merge(intervals)
 
+    # The span starts at the first session, as in the CLI. Time before this
+    # host ever captured is not a gap: counting it made a server started this
+    # morning report 0.25% coverage and a 6.5-day hole.
+    if first_start is not None and first_start > window_start:
+        window_start = first_start
+
     per_day = []
-    day = window_start
+    day = window_start.replace(hour=0, minute=0, second=0, microsecond=0)
     while day < now:
-        nxt = min(day + timedelta(days=1), now)
-        secs = sum(max(0.0, (min(e, nxt) - max(s, day)).total_seconds()) for s, e in covered)
-        span = (nxt - day).total_seconds()
+        lo, hi = max(day, window_start), min(day + timedelta(days=1), now)
+        secs = sum(max(0.0, (min(e, hi) - max(s, lo)).total_seconds()) for s, e in covered)
+        span = (hi - lo).total_seconds()
         per_day.append({"date": f"{day:%Y-%m-%d}", "covered_s": secs, "span_s": span})
         day += timedelta(days=1)
 
@@ -465,6 +473,13 @@ def allow(ip):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "kalshi-dashboard"
+    # Link-preview crawlers (LinkedIn among them) often send HEAD before GET and
+    # give up on an error. HEAD runs the same route and drops the body.
+    head_only = False
+
+    def do_HEAD(self):
+        self.head_only = True
+        self.do_GET()
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -489,7 +504,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.fail(400, f"hours must be one of {CHART_HOURS}")
                 return self.json(history(ticker, hours))
             if url.path in ("/", "/index.html"):
-                return self.static("index.html", "text/html; charset=utf-8")
+                return self.page()
+            if url.path == "/preview.png":
+                return self.static("preview.png", "image/png", max_age=3600)
             return self.fail(404, "not found")
         except ValueError:
             return self.fail(400, "bad parameter")
@@ -513,16 +530,41 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not self.head_only:
+            self.wfile.write(body)
 
-    def static(self, name, content_type):
+    def origin(self):
+        """This page's public origin, for the absolute URLs link previews need.
+
+        Taken from the Host header, which Caddy passes through, and checked
+        against a strict pattern before it goes anywhere near the HTML.
+        """
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+        if not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}(:\d{1,5})?", host):
+            return ""
+        local = host.split(":")[0] in ("localhost", "127.0.0.1")
+        return ("http://" if local else "https://") + host
+
+    def page(self):
+        with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as handle:
+            html = handle.read()
+        self.send_body(html.replace("{{origin}}", self.origin()).encode(),
+                       "text/html; charset=utf-8")
+
+    def static(self, name, content_type, max_age=0):
         with open(os.path.join(STATIC, name), "rb") as handle:
             body = handle.read()
+        self.send_body(body, content_type, max_age)
+
+    def send_body(self, body, content_type, max_age=0):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if max_age:
+            self.send_header("Cache-Control", f"public, max-age={max_age}")
         self.end_headers()
-        self.wfile.write(body)
+        if not self.head_only:
+            self.wfile.write(body)
 
     def fail(self, code, message):
         body = json.dumps({"error": message}).encode()
@@ -530,7 +572,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not self.head_only:
+            self.wfile.write(body)
 
     def log_message(self, format, *args):  # noqa: A002 -- quiet; errors go to stderr
         pass

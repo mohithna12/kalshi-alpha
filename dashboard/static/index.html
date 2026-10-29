@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Capture Status</title>
+<meta name="description" content="Live health of a read-only market-data capture for Kalshi NFL prediction markets: uptime, coverage gaps, and every captured market with its price history.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="kalshi-alpha">
+<meta property="og:title" content="kalshi-alpha: live Kalshi NFL market capture">
+<meta property="og:description" content="Read-only capture of Kalshi NFL prediction markets: health, coverage gaps, and price history for every market, live.">
+<meta property="og:url" content="{{origin}}/">
+<meta property="og:image" content="{{origin}}/preview.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="627">
+<meta property="og:image:alt" content="The kalshi-alpha capture dashboard: health tiles, a seven-day coverage timeline, and NFL market prices.">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css">
 <style>
 :root {
@@ -171,7 +182,7 @@ tbody tr.mkt:focus-visible { outline: 2px solid var(--series-1); outline-offset:
   <section class="card" id="coverage-card">
     <div class="card-head">
       <h2>Coverage</h2>
-      <span class="note">Last 7 UTC days, from session records. A gap is time nothing was recorded.</span>
+      <span class="note" id="cov-note">Last 7 UTC days, from session records. A gap is time nothing was recorded.</span>
     </div>
     <div class="hero num" id="cov-hero">&nbsp;</div>
     <div class="sub" id="cov-sub">&nbsp;</div>
@@ -338,6 +349,10 @@ async function loadCoverage() {
   const pct = c.span_s ? (c.covered_s / c.span_s) * 100 : 0;
   const missing = c.span_s - c.covered_s;
   $("cov-hero").textContent = `${pct.toFixed(2)}%`;
+  const since = Date.parse(c.window_start);
+  $("cov-note").textContent = (Date.now() - since < 6.5 * 864e5
+    ? `Since this host started capturing, ${utc(c.window_start)} UTC.`
+    : "Last 7 UTC days.") + " From session records; a gap is time nothing was recorded.";
   $("cov-sub").textContent = `${duration(missing)} not captured, across ${c.gaps.length} gap${c.gaps.length === 1 ? "" : "s"} over two minutes`;
 
   const covered = c.covered.map(([a, b]) => [Date.parse(a), Date.parse(b)]);
@@ -354,12 +369,20 @@ async function loadCoverage() {
         style: `left:${((s - start) / 864e5) * 100}%;width:${((e - s) / 864e5) * 100}%`,
       }));
     }
-    // Time that has not happened yet is not a gap: hide that part of today's track.
+    // Time outside the span is not a gap: hide what has not happened yet, and
+    // what came before this host first captured.
     const now = Date.now();
+    const spanStart = Date.parse(c.window_start);
     if (now < end) {
       track.append(el("div", {
         class: "future",
         style: `left:${((now - start) / 864e5) * 100}%;right:0`,
+      }));
+    }
+    if (spanStart > start) {
+      track.append(el("div", {
+        class: "future",
+        style: `left:0;width:${((Math.min(spanStart, end) - start) / 864e5) * 100}%`,
       }));
     }
     const wrap = el("div", { style: "position:relative" }, [track]);
